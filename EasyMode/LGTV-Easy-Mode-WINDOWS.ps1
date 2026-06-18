@@ -348,6 +348,10 @@ if ($Background) {
     Log "Detaching watcher to background. Log: $LogFile"
     $repoSelf = Join-Path (App-Dir) $LauncherName
     $useSelf = if (Test-Path $repoSelf) { $repoSelf } else { $PSCommandPath }
+    # We just installed deps and synced, so tell the detached supervisor not to
+    # redo all that on startup (it still self-updates on its own timer). This
+    # keeps every background start fast - no repeated winget scan or git fetch.
+    $env:LGTV_EASY_HANDOFF = "1"
     Start-Process -FilePath "powershell.exe" -WindowStyle Hidden `
         -ArgumentList @("-ExecutionPolicy","Bypass","-File",$useSelf,"-Supervise")
     Pause-Info @("Settings saved. Easy Mode is now running in the background.",

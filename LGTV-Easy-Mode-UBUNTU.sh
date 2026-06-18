@@ -274,7 +274,15 @@ main() {
         fi
       fi
       log "Detaching to background. Log: $LOG_FILE"
-      setsid "$0" --supervise </dev/null >>"$LOG_FILE" 2>&1 &
+      # Use the resolved absolute path, never the raw "$0": when the launcher is
+      # invoked by a bare name (e.g. `bash LGTV-Easy-Mode-UBUNTU.sh`), "$0" has
+      # no directory part, so setsid's execvp would search $PATH instead of the
+      # current directory and fail with "No such file or directory". Run it
+      # through bash so a missing execute bit can't break the detach either.
+      # HANDOFF=1: we just installed deps and synced, so the detached supervisor
+      # shouldn't redo all that on startup (it still self-updates on its own
+      # timer) - this keeps every background start fast and offline-friendly.
+      LGTV_EASY_HANDOFF=1 setsid bash "$SELF_PATH" --supervise </dev/null >>"$LOG_FILE" 2>&1 &
       exit 0
       ;;
     --supervise)
