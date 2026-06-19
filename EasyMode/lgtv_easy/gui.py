@@ -365,6 +365,39 @@ class SetupWizard(ttk.Frame):
         # Thread-safe wrapper so worker threads can log into it.
         return lambda line: self.app.post(lambda: append(line))
 
+    def _make_collapsible_diag(self, label="Network details", height=5):
+        """A diagnostics area tucked behind a toggle, so the first screen stays
+        clean and unintimidating for a beginner. Worker threads still log into it
+        the whole time; it auto-opens (via the returned ``show``) when something
+        actually goes wrong, e.g. a scan finds no TVs. Returns ``(append, show)``."""
+        holder = ttk.Frame(self)
+        holder.pack(fill="both", expand=True, pady=(PAD, 0))
+        state = {"open": False}
+        btn = ttk.Button(holder, style="Ghost.TButton")
+        btn.pack(anchor="w")
+        body = ttk.Frame(holder)
+        append = self._make_diag(parent=body, height=height)
+
+        def render():
+            btn.config(text=("▾  " if state["open"] else "▸  ") + label)
+            if state["open"]:
+                body.pack(fill="both", expand=True)
+            else:
+                body.pack_forget()
+
+        def toggle():
+            state["open"] = not state["open"]
+            render()
+
+        def show():
+            if not state["open"]:
+                state["open"] = True
+                render()
+
+        btn.config(command=toggle)
+        render()
+        return append, show
+
     # ----- step 1: find ------------------------------------------------
     def _build_step1(self):
         self._reset()
@@ -394,10 +427,12 @@ class SetupWizard(ttk.Frame):
         ttk.Entry(row, textvariable=self.selected_ip, width=16).pack(
             side="left", fill="x", expand=True)
 
-        ttk.Label(self, text="Details", style="Sub.TLabel").pack(anchor="w")
-        self.diag = self._make_diag(height=5)
-        # Show which network this PC is on up front: a TV that won't be found is
-        # most often simply on a different network/subnet than the PC.
+        # Keep the first screen clean: the network diagnostics live behind a
+        # "Network details" toggle and only pop open on their own if a scan turns
+        # up nothing (the case where they actually help).
+        self.diag, self._show_details = self._make_collapsible_diag()
+        # Gather which network this PC is on up front (into the hidden box): a TV
+        # that won't be found is most often simply on a different subnet.
         threading.Thread(target=lambda: subnet_report("", self.diag),
                          daemon=True).start()
 
@@ -420,6 +455,9 @@ class SetupWizard(ttk.Frame):
         if not results:
             self.scan_status.config(
                 text="No TVs found. Type the IP address manually above.")
+            # Surface the network details now - they explain why nothing showed up
+            # (e.g. the PC is on a different subnet than the TV).
+            self._show_details()
             return
         for dev in results:
             self.listbox.insert(tk.END, f"{dev.name}   ({dev.ip})")
