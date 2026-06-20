@@ -98,6 +98,9 @@ def cmd_set(args) -> int:
     if args.off_on_shutdown is not None:
         cfg.tv_off_on_shutdown = args.off_on_shutdown
         changed.append(f"off_on_shutdown={args.off_on_shutdown}")
+    if args.manage_suspend is not None:
+        cfg.manage_suspend = args.manage_suspend
+        changed.append(f"manage_suspend={args.manage_suspend}")
     if args.mac is not None:
         cfg.device.mac = args.mac
         changed.append(f"mac={args.mac}")
@@ -124,6 +127,8 @@ def cmd_status(args) -> int:
         _print("  Deep off    : OFF (screen blanks only; TV stays powered)")
     _print(f"  Off on quit : {'ON' if cfg.tv_off_on_shutdown else 'OFF'} "
            "(power the TV off when the PC shuts down)")
+    _print(f"  Follow sleep: {'ON' if cfg.manage_suspend else 'OFF'} "
+           "(TV sleeps/wakes with the PC, like a monitor)")
     _print(f"  Idle backend: {idle_mod.idle_backend_name()} "
            f"(real={idle_mod.is_real_backend()})")
     if not idle_mod.is_real_backend():
@@ -410,6 +415,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="total idle minutes before fully powering off")
     s.add_argument("--off-on-shutdown", dest="off_on_shutdown", type=_boolish,
                    help="power the TV off when the PC shuts down (true/false)")
+    s.add_argument("--manage-suspend", dest="manage_suspend", type=_boolish,
+                   help="TV follows the PC into/out of sleep, like a monitor "
+                        "(true/false)")
     s.add_argument("--mac", help="set Wake-on-LAN MAC address")
     s.set_defaults(func=cmd_set)
 

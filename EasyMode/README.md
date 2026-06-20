@@ -24,6 +24,7 @@ python3 -m lgtv_easy --help     # all commands (scan, pair, set, status, run, ..
 | `wizard_text.py` | the text-mode wizard (fallback when there's no display) |
 | `daemon.py` | the idle-watching loop that blanks/wakes the TV |
 | `idle.py` | cross-platform "seconds since last input" detection |
+| `power_events.py` | OS suspend/resume hooks so the TV follows the PC to sleep |
 | `webos.py` / `_ws.py` | the WebOS WebSocket protocol + pairing |
 | `discovery.py` | finding TVs on the network (SSDP) |
 | `wol.py` | Wake-on-LAN magic packets |

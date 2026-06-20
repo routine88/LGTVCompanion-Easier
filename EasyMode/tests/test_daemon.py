@@ -159,6 +159,98 @@ def test_deep_off_skipped_without_wol_mac():
         assert d.deep_offs == 0
 
 
+def test_on_suspend_blanks_and_on_resume_restores():
+    with MockTV(require_pairing=False) as tv:
+        d = _make(tv, _cfg(minutes=99.0))  # idle timer would never fire
+        assert d.screen_state == STATE_ON
+
+        d.on_suspend()
+        assert tv.screen_on is False
+        assert d.screen_state == STATE_OFF
+        assert d.suspends == 1
+
+        # While the PC slept the TV may have hit its own standby; resume must
+        # re-assert screen-on regardless of what state we last recorded.
+        tv.screen_on = False
+        d.on_resume()
+        assert tv.screen_on is True
+        assert d.screen_state == STATE_ON
+        assert d.resumes == 1
+
+
+def test_on_suspend_deep_off_when_enabled_with_mac():
+    with MockTV(require_pairing=False) as tv:
+        cfg = _cfg(minutes=99.0)
+        cfg.deep_off_enabled = True
+        cfg.device.mac = "AA:BB:CC:DD:EE:FF"  # WOL available -> full power-off
+        d = _make(tv, cfg)
+        d.on_suspend()
+        assert tv.powered_on is False
+        assert d.screen_state == STATE_STANDBY
+        assert d.deep_offs == 1
+
+
+def test_on_suspend_blanks_only_without_wol_mac():
+    # Deep-off on suspend with no MAC would strand the TV; fall back to blanking.
+    with MockTV(require_pairing=False) as tv:
+        cfg = _cfg(minutes=99.0)
+        cfg.deep_off_enabled = True  # but cfg.device.mac is "" (none)
+        d = _make(tv, cfg)
+        d.on_suspend()
+        assert tv.powered_on is True
+        assert d.screen_state == STATE_OFF
+
+
+def test_manage_suspend_disabled_is_a_noop():
+    with MockTV(require_pairing=False) as tv:
+        cfg = _cfg(minutes=99.0)
+        cfg.manage_suspend = False
+        d = _make(tv, cfg)
+        d.on_suspend()
+        assert tv.screen_on is True and d.screen_state == STATE_ON and d.suspends == 0
+        # Resume is likewise hands-off when the user opted out.
+        d.on_resume()
+        assert d.resumes == 0
+
+
+def test_resume_idempotent_when_already_on():
+    with MockTV(require_pairing=False) as tv:
+        d = _make(tv, _cfg(minutes=99.0))
+        d.on_resume()  # spurious resume with the TV already on
+        assert tv.screen_on is True
+        assert d.screen_state == STATE_ON
+
+
+def test_run_loop_restores_tv_after_a_freeze(monkeypatch):
+    # Case B: the PC suspended before the idle timer blanked the TV (state still
+    # ON), and the TV dropped to its own standby meanwhile. The run loop's
+    # wall-clock gap detector must notice the freeze and bring the TV back.
+    monkeypatch.setenv("LGTV_EASY_NO_POWER_HOOK", "1")  # don't spawn an OS hook
+    with MockTV(require_pairing=False) as tv:
+        d = _make(tv, _cfg(minutes=99.0))
+        d._idle_box["v"] = 0          # user is present after resuming
+        tv.screen_on = False          # TV self-standbyed while the PC slept
+
+        clock = {"t": 0.0}
+        step = {"n": 0}
+
+        def fake_sleep(_seconds):
+            step["n"] += 1
+            if step["n"] == 1:
+                clock["t"] += 999.0    # a huge jump => the process was frozen
+            else:
+                d._stop.set()          # let the loop exit after the 2nd pass
+                clock["t"] += d.config.poll_seconds
+
+        d._sleep_fn = fake_sleep
+        d._clock = lambda: clock["t"]
+
+        d.run()  # blocks until _stop is set
+
+        assert tv.screen_on is True
+        assert d.resumes >= 1
+
+
 def test_survives_tv_disconnect():
     tv = MockTV(require_pairing=False).start()
     d = _make(tv, _cfg(minutes=1.0))

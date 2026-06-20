@@ -70,6 +70,10 @@ class Config:
     deep_off_minutes: float = 30.0
     # Power the TV fully off when the PC shuts down or logs off.
     tv_off_on_shutdown: bool = True
+    # Behave like a real monitor: when the PC suspends, blank/standby the TV at
+    # once (not after the idle timer); when it resumes, bring the TV straight
+    # back. On by default - it is the whole point of using the TV as a monitor.
+    manage_suspend: bool = True
     # True once the setup wizard has completed successfully.
     setup_complete: bool = False
     device: Device = field(default_factory=Device)
