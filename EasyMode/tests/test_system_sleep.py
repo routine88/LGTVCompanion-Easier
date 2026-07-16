@@ -4,6 +4,9 @@ These exercise the daemon's suspend/resume handlers directly (no real OS power
 event needed) and check that the platform watcher factory is always safe to call.
 """
 import logging
+import sys
+
+import pytest
 
 from lgtv_easy import system_sleep
 from lgtv_easy.config import Config, Device
@@ -155,6 +158,31 @@ def test_make_watcher_returns_a_usable_object():
                                   on_shutdown=lambda: None)
     assert hasattr(w, "start") and hasattr(w, "stop")
     assert isinstance(w.backend_name, str)
+
+
+def test_windows_notify_flag_is_callback_not_window_handle():
+    # Regression, and runnable on every platform (it is a plain constant check).
+    # This was 0 (DEVICE_NOTIFY_WINDOW_HANDLE), which makes Windows read the
+    # callback struct as an HWND and reject registration with ERROR_INVALID_
+    # PARAMETER - so the TV silently never followed the PC into sleep. Only 2
+    # (DEVICE_NOTIFY_CALLBACK) is correct for the no-window callback form.
+    assert system_sleep._WindowsWatcher._DEVICE_NOTIFY_CALLBACK == 2
+
+
+@pytest.mark.skipif(not sys.platform.startswith("win"),
+                    reason="exercises a real Windows power-notification handle")
+def test_windows_watcher_actually_registers_with_the_os():
+    # The bug above survived because the only factory test never called start().
+    # Registration is the entire point of the watcher, so drive it for real: this
+    # fails loudly on a bad Flags value instead of leaving it to a user's log.
+    w = system_sleep._WindowsWatcher(on_sleep=lambda: None,
+                                     on_resume=lambda: None, logger=None)
+    w.start()  # raises OSError if the OS rejects the registration
+    try:
+        assert w._handle is not None
+    finally:
+        w.stop()
+    assert w._handle is None
 
 
 def test_logind_watcher_routes_sleep_resume_and_shutdown_lines():

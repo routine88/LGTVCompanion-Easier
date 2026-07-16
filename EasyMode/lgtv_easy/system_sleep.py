@@ -55,7 +55,16 @@ class _WindowsWatcher:
     _PBT_APMSUSPEND = 0x0004
     _PBT_APMRESUMESUSPEND = 0x0007
     _PBT_APMRESUMEAUTOMATIC = 0x0012
-    _DEVICE_NOTIFY_CALLBACK = 0
+    # Flags for PowerRegisterSuspendResumeNotification (winuser.h). This MUST be
+    # 2: it tells Windows the Recipient is a callback struct. It is NOT a
+    # zero/"default" flag - 0 means DEVICE_NOTIFY_WINDOW_HANDLE, under which
+    # Windows reads our _SUBSCRIBE pointer as an HWND, fails to validate it, and
+    # returns ERROR_INVALID_PARAMETER (87) so the TV never follows the PC to
+    # sleep.
+    #   DEVICE_NOTIFY_WINDOW_HANDLE  = 0
+    #   DEVICE_NOTIFY_SERVICE_HANDLE = 1
+    #   DEVICE_NOTIFY_CALLBACK       = 2
+    _DEVICE_NOTIFY_CALLBACK = 2
 
     def __init__(self, on_sleep, on_resume, logger):
         self._on_sleep = on_sleep
