@@ -122,6 +122,31 @@ class Config:
                 os.remove(tmp)
         return path
 
+    # ----- "is there actually a TV?" -----------------------------------
+    # Every surface (CLI, GUI, the login watcher) asks the same question here so
+    # they can never disagree about whether Easy Mode has anything to drive.
+    @property
+    def tv_configured(self) -> bool:
+        """True when a usable TV is saved: set up, addressable and paired."""
+        return bool(self.setup_complete and self.device.ip and self.device.paired)
+
+    def unconfigured_reason(self) -> Optional[str]:
+        """``None`` when a TV is usable, else a plain-language reason why not.
+
+        Half-finished states are their own trap: an address with no pairing key
+        looks configured in the config file but can never drive the TV, so each
+        one gets its own message rather than a blanket "not set up".
+        """
+        if self.tv_configured:
+            return None
+        if not self.device.ip and not self.device.paired:
+            return "No TV has been set up yet."
+        if not self.device.ip:
+            return "A TV is paired but has no address saved."
+        if not self.device.paired:
+            return f"The TV at {self.device.ip} was never paired."
+        return f"Setup was never finished for the TV at {self.device.ip}."
+
     @property
     def idle_seconds(self) -> float:
         return max(1.0, float(self.idle_minutes) * 60.0)

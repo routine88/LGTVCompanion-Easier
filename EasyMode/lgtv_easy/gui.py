@@ -48,6 +48,7 @@ PALETTE = {
     "accent_hi": "#7AA2FF",
     "accent_lo": "#4377F0",
     "danger":    "#FF6B6B",
+    "danger_bg": "#2B1B20",   # dark red-tinted surface for warning cards
     "ok":        "#48D597",
 }
 
@@ -102,6 +103,21 @@ def _apply_theme(root: tk.Misc) -> dict:
                     font=(ui, 9))
     style.configure("Value.TLabel", background=P["surface"], foreground=P["accent"],
                     font=(ui, 24, "bold"))
+
+    # The "no TV is set up" warning: a red card that cannot be read as chrome.
+    style.configure("Danger.TFrame", background=P["danger_bg"])
+    style.configure("DangerTitle.TLabel", background=P["danger_bg"],
+                    foreground=P["danger"], font=(ui, 12, "bold"))
+    style.configure("DangerBody.TLabel", background=P["danger_bg"],
+                    foreground=P["text"], font=(ui, 10))
+    style.configure("DangerMuted.TLabel", background=P["danger_bg"],
+                    foreground=P["muted"], font=(ui, 9))
+    style.configure("Danger.TButton", background=P["danger"], foreground="#2B1B20",
+                    bordercolor=P["danger"], lightcolor=P["danger"],
+                    darkcolor=P["danger"], borderwidth=0, relief="flat",
+                    padding=(16, 9), font=(ui, 10, "bold"))
+    style.map("Danger.TButton", background=[("active", "#FF8585"),
+                                            ("pressed", "#E85C5C")])
 
     style.configure("TButton", background=P["inset"], foreground=P["text"],
                     bordercolor=P["border"], lightcolor=P["inset"], darkcolor=P["inset"],
@@ -309,6 +325,73 @@ def make_diag(app: "App", parent: tk.Misc, height: int = 6):
             pass
 
     return lambda line: app.post(lambda: append(line))
+
+
+NO_TV_TITLE = "No TV is set up"
+NO_TV_BODY = ("Easy Mode is running but has nothing to control, so your TV "
+              "will never sleep on idle.")
+
+
+def make_no_tv_banner(parent: tk.Misc, reason: str, on_setup=None):
+    """A red 'no TV is set up' card. Returns the frame (already packed).
+
+    The state it announces is silent by nature - the app looks perfectly healthy
+    while doing nothing at all - so it is deliberately the loudest thing on
+    screen: red on a red-tinted card, above everything else.
+    """
+    card = ttk.Frame(parent, style="Danger.TFrame", padding=PAD)
+    card.pack(fill="x", pady=(0, PAD - 4))
+    head = ttk.Frame(card, style="Danger.TFrame")
+    head.pack(fill="x")
+    dot = tk.Canvas(head, width=12, height=12, highlightthickness=0, bd=0,
+                    bg=THEME["danger_bg"])
+    dot.create_oval(1, 1, 11, 11, fill=THEME["danger"], outline=THEME["danger"])
+    dot.pack(side="left", padx=(0, 8), pady=(4, 0), anchor="n")
+    ttk.Label(head, text=NO_TV_TITLE, style="DangerTitle.TLabel").pack(
+        side="left", anchor="w")
+    ttk.Label(card, text=NO_TV_BODY, style="DangerBody.TLabel",
+              wraplength=420, justify="left").pack(anchor="w", pady=(6, 0))
+    ttk.Label(card, text=reason, style="DangerMuted.TLabel",
+              wraplength=420, justify="left").pack(anchor="w", pady=(4, 0))
+    if on_setup is not None:
+        ttk.Button(card, text="Set up my TV", style="Danger.TButton",
+                   command=on_setup).pack(anchor="w", pady=(PAD - 2, 0))
+    return card
+
+
+def show_no_tv_alert(reason: str) -> None:
+    """Standalone red warning window, for when there is no console to print to.
+
+    Owns its own Tk root because the caller is the headless watcher process
+    (started by pythonw at login), not the GUI. Blocks until dismissed.
+    "Set up my TV" launches the real control panel as a separate process, so
+    this window never has to become one.
+    """
+    root = tk.Tk()
+    root.title("LGTV Companion Easy Mode")
+    _apply_theme(root)
+    root.resizable(False, False)
+    tk.Frame(root, height=3, bg=THEME["danger"]).pack(fill="x")
+    body = ttk.Frame(root, padding=(PAD + 4, PAD, PAD + 4, PAD + 4))
+    body.pack(fill="both", expand=True)
+
+    def open_setup():
+        import subprocess
+        import sys
+        from pathlib import Path
+        try:
+            subprocess.Popen([sys.executable, "-m", "lgtv_easy", "gui"],
+                             cwd=str(Path(__file__).resolve().parents[1]))
+        except Exception:  # noqa: BLE001 - nothing useful to do if it won't start
+            pass
+        root.destroy()
+
+    make_no_tv_banner(body, reason, on_setup=open_setup)
+    ttk.Button(body, text="Close", style="Ghost.TButton",
+               command=root.destroy).pack(anchor="e")
+    root.update_idletasks()
+    root.minsize(root.winfo_reqwidth(), root.winfo_reqheight())
+    root.mainloop()
 
 
 class App(tk.Tk):
@@ -752,6 +835,14 @@ class SettingsPanel(ttk.Frame):
                                 wraplength=420, justify="left")
         self.status.pack(side="left", fill="x", expand=True)
 
+        # If the saved TV has gone missing, say so in red before anything else.
+        # An unreadable or wiped config silently loads as "no TV", and without
+        # this the everyday screen still looks perfectly healthy while the app
+        # controls nothing at all.
+        reason = cfg.unconfigured_reason()
+        if reason is not None:
+            make_no_tv_banner(self, reason, on_setup=self.app.show_wizard)
+
         # Compact "connected to" line instead of a whole card. Kept on the panel
         # so the startup self-test / repair can update the address if the TV moved.
         self._conn_label = ttk.Label(
@@ -906,6 +997,8 @@ class SettingsPanel(ttk.Frame):
     # ----- connection self-test / repair ------------------------------
     def _conn_text(self) -> str:
         cfg = self.app.cfg
+        if not cfg.device.ip:
+            return "No TV connected"
         return f"Connected to  {cfg.device.name}  ·  {cfg.device.ip}"
 
     def _refresh_conn_label(self):
