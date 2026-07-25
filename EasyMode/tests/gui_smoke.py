@@ -29,6 +29,13 @@ def pump(app, n=20):
         app.update()
 
 
+def danger_banners(widget):
+    """The red 'No TV is set up' cards directly inside ``widget``."""
+    return [w for w in widget.winfo_children()
+            if isinstance(w, gui.ttk.Frame)
+            and str(w.cget("style")) == "Danger.TFrame"]
+
+
 def main():
     tv = MockTV(require_pairing=True).start()
 
@@ -80,6 +87,7 @@ def main():
     assert isinstance(panel, gui.SettingsPanel), "settings panel after finish"
     assert app.cfg.setup_complete and app.cfg.idle_minutes == 7
     assert app.cfg.device.ip == "127.0.0.1"
+    assert not danger_banners(panel), "no red banner while a TV is configured"
     print("[gui] Settings panel rendered. Status:",
           panel.status.cget("text"))
 
@@ -182,9 +190,28 @@ def main():
     holder_proc.wait(timeout=5)
     os.remove(lock.path)
 
+    # A config that has lost its TV - wiped, or unreadable and silently reloaded
+    # as empty - must never leave a screen that looks perfectly healthy while the
+    # app controls nothing. It sends the user back to the wizard, and the
+    # everyday panel itself carries a red "No TV is set up" banner.
+    from lgtv_easy.config import Config
+    Config().save()
+    app3 = gui.App()
+    pump(app3)
+    assert isinstance(app3.container.winfo_children()[0], gui.SetupWizard), \
+        "a wiped config sends the user back to the wizard"
+    panel3 = gui.SettingsPanel(app3.container, app3)
+    panel3.pack(fill="both", expand=True)
+    pump(app3)
+    assert len(danger_banners(panel3)) == 1, \
+        "settings panel warns in red when there is no TV"
+    assert panel3._conn_text() == "No TV connected"
+    print("[gui] Red 'No TV is set up' banner shown on an empty config. ✓")
+    app3.on_close()
+
     tv.stop()
     print("[gui] SUCCESS — GUI builds, wizard pairs, settings persist, "
-          "watcher is single-instance. ✓")
+          "watcher is single-instance, empty config warns in red. ✓")
     return 0
 
 
