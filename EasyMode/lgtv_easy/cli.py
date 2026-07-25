@@ -88,13 +88,34 @@ def warn_no_tv(cfg, action: str = "") -> None:
 
 
 def _has_console() -> bool:
-    """False when nothing we print can possibly be read.
+    """False when nobody can read what we print.
 
-    ``pythonw`` - which the login auto-start entry uses so no console window
-    flashes - leaves ``sys.stdout`` as None. That is precisely the case where a
-    printed warning is worthless and an on-screen one is needed instead.
+    Both auto-start paths land here, for different reasons:
+
+    * Windows: the Startup entry runs ``pythonw`` so no console window flashes,
+      which leaves ``sys.stdout`` as None outright.
+    * Linux: the ``.desktop`` entry sets ``Terminal=false``, so stdout is a real
+      file descriptor - pointing at the journal or ~/.xsession-errors, where no
+      user will ever see it. Testing for None alone would wrongly conclude
+      somebody is watching.
+
+    So the question is whether stdout is a terminal, not whether it exists.
     """
-    return sys.stdout is not None
+    stream = sys.stdout
+    if stream is None:
+        return False
+    try:
+        return bool(stream.isatty())
+    except Exception:  # noqa: BLE001 - a detached or dummy stream
+        return False
+
+
+def _has_display() -> bool:
+    """True if there is a desktop session that could show a window at all."""
+    import os
+    if os.name == "nt":
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 def _alert_no_tv(reason: str) -> None:
@@ -105,6 +126,8 @@ def _alert_no_tv(reason: str) -> None:
     """
     import os
     if os.environ.get("LGTV_EASY_NO_ALERT") == "1":
+        return
+    if not _has_display():
         return
     try:
         from .gui import show_no_tv_alert

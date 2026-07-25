@@ -6,6 +6,7 @@ the config was wiped and silently reloaded as empty). Every surface has to say
 so out loud rather than carry on as if all is well.
 """
 import logging
+import os
 
 import pytest
 
@@ -127,16 +128,30 @@ def test_run_records_the_reason_in_the_log_file(capsys, tmp_path, monkeypatch):
     assert "No TV has been set up yet." in logged
 
 
-def test_run_alerts_on_screen_when_there_is_no_console(tmp_path, monkeypatch):
-    """pythonw at login leaves sys.stdout as None: printing is useless there, so
-    the warning has to become a window instead."""
+class _FakeStdout:
+    """Enough of a stream for _has_console; ``tty`` picks which case it is."""
+
+    def __init__(self, tty):
+        self.tty = tty
+
+    def isatty(self):
+        return self.tty
+
+    def write(self, _text):
+        return 0
+
+    def flush(self):
+        pass
+
+
+def test_run_alerts_when_stdout_is_none(tmp_path, monkeypatch):
+    """Windows: pythonw at login leaves sys.stdout as None, so printing is
+    useless and the warning has to become a window instead."""
     _isolate(monkeypatch, tmp_path)
-    monkeypatch.delenv("LGTV_EASY_NO_ALERT")
     Config().save()
     shown = []
     monkeypatch.setattr(cli, "_alert_no_tv", shown.append)
-    # print() is a no-op while sys.stdout is None, so capsys sees nothing here -
-    # which is exactly the login behaviour being reproduced.
+    # print() is a no-op while sys.stdout is None - exactly the login behaviour.
     monkeypatch.setattr(cli.sys, "stdout", None)
     try:
         assert cli.cmd_run(None) == 1
@@ -145,16 +160,57 @@ def test_run_alerts_on_screen_when_there_is_no_console(tmp_path, monkeypatch):
     assert shown == ["No TV has been set up yet."]
 
 
-def test_run_does_not_alert_when_a_console_is_present(tmp_path, monkeypatch,
-                                                      capsys):
+def test_run_alerts_when_stdout_is_not_a_terminal(tmp_path, monkeypatch):
+    """Linux: the .desktop auto-start entry sets Terminal=false, so stdout is a
+    real fd pointing at the journal - present, but read by nobody. Checking only
+    for None would leave Linux users with the silent failure this exists to
+    prevent."""
     _isolate(monkeypatch, tmp_path)
     Config().save()
     shown = []
     monkeypatch.setattr(cli, "_alert_no_tv", shown.append)
+    monkeypatch.setattr(cli.sys, "stdout", _FakeStdout(tty=False))
+    try:
+        assert cli.cmd_run(None) == 1
+    finally:
+        monkeypatch.undo()
+    assert shown == ["No TV has been set up yet."]
 
-    cli.cmd_run(None)
-    capsys.readouterr()
-    assert shown == []          # it printed; a window would just be noise
+
+def test_run_does_not_alert_on_a_real_terminal(tmp_path, monkeypatch):
+    _isolate(monkeypatch, tmp_path)
+    Config().save()
+    shown = []
+    monkeypatch.setattr(cli, "_alert_no_tv", shown.append)
+    monkeypatch.setattr(cli.sys, "stdout", _FakeStdout(tty=True))
+    try:
+        cli.cmd_run(None)
+    finally:
+        monkeypatch.undo()
+    assert shown == []          # it printed where they can see it
+
+
+def _pretend_linux(monkeypatch):
+    """cli imports os inside its functions, so patch the module they resolve."""
+    monkeypatch.setattr(os, "name", "posix")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+
+
+def test_no_alert_on_a_headless_linux_box(monkeypatch):
+    """No desktop session means no window to show; the log entry stands alone,
+    and trying anyway must not raise on the way out."""
+    monkeypatch.delenv("LGTV_EASY_NO_ALERT", raising=False)
+    _pretend_linux(monkeypatch)
+    assert cli._has_display() is False
+    cli._alert_no_tv("No TV has been set up yet.")   # must not raise
+
+
+@pytest.mark.parametrize("var", ["DISPLAY", "WAYLAND_DISPLAY"])
+def test_display_detected_on_x11_and_wayland(var, monkeypatch):
+    _pretend_linux(monkeypatch)
+    monkeypatch.setenv(var, ":0")
+    assert cli._has_display() is True
 
 
 def test_alert_never_raises_without_a_display(monkeypatch):

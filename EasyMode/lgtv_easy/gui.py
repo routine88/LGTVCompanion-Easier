@@ -359,13 +359,19 @@ def make_no_tv_banner(parent: tk.Misc, reason: str, on_setup=None):
     return card
 
 
-def show_no_tv_alert(reason: str) -> None:
+def show_no_tv_alert(reason: str, dismiss_after: float = 300.0) -> None:
     """Standalone red warning window, for when there is no console to print to.
 
     Owns its own Tk root because the caller is the headless watcher process
-    (started by pythonw at login), not the GUI. Blocks until dismissed.
-    "Set up my TV" launches the real control panel as a separate process, so
-    this window never has to become one.
+    (started by pythonw on Windows, or a Terminal=false .desktop entry on
+    Linux), not the GUI. "Set up my TV" launches the real control panel as a
+    separate process, so this window never has to become one.
+
+    Blocks until dismissed or ``dismiss_after`` seconds pass. The timeout
+    matters because "no console" also covers redirected output and systemd user
+    units: waiting forever there would hang a script on a window nobody is sat
+    in front of. Nothing is lost when it closes itself - the reason is in the
+    log file, and every later ``status`` still says so.
     """
     root = tk.Tk()
     root.title("LGTV Companion Easy Mode")
@@ -391,6 +397,8 @@ def show_no_tv_alert(reason: str) -> None:
                command=root.destroy).pack(anchor="e")
     root.update_idletasks()
     root.minsize(root.winfo_reqwidth(), root.winfo_reqheight())
+    if dismiss_after and dismiss_after > 0:
+        root.after(int(dismiss_after * 1000), root.destroy)
     root.mainloop()
 
 
