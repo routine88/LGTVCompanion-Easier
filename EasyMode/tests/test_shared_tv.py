@@ -95,6 +95,9 @@ def test_idle_pc_does_not_blank_the_tv_showing_the_other_pc():
 
 
 def test_blanks_normally_once_the_tv_is_back_on_this_pc():
+    """Back on this input, the timeout applies again as usual - but measured
+    from the moment it came back on screen, not from the last keypress. Time
+    spent behind the other computer is not held against it."""
     with MockTV(require_pairing=False) as tv:
         tv.foreground_app = "com.webos.app.hdmi2"
         d = _make(tv, _cfg(minutes=7.0))
@@ -109,6 +112,11 @@ def test_blanks_normally_once_the_tv_is_back_on_this_pc():
 
         tv.foreground_app = "com.webos.app.hdmi2"  # switched back to this PC
         _advance(d, 60)
+        d.tick()
+        assert tv.screen_on is True, "a minute back on screen is inside the 7"
+
+        _advance(d, 7 * 60)                        # now the timeout really has run
+        d._idle_box["v"] += 7 * 60
         d.tick()
         assert tv.screen_on is False
         assert d.screen_state == STATE_OFF
@@ -232,6 +240,124 @@ def test_follows_the_pc_to_a_new_socket_after_the_relearn_window():
         _advance(d, INPUT_RELEARN_SECONDS + 60)
         d.tick()
         assert d.config.device.input_id == "hdmi3"
+
+
+# ----- coming back to this input ---------------------------------------
+def test_switching_back_restarts_the_countdown_instead_of_blanking():
+    """The reported bug: switch the TV back to this PC and its desktop shows for
+    a second or two, then goes black. It never entered the off state (the guard
+    kept refusing), so it sat at ON with a long-expired timer and fired the
+    instant the guard let go - and the OS idle timer can't know the user just
+    pressed the remote rather than this keyboard."""
+    with MockTV(require_pairing=False) as tv:
+        tv.foreground_app = "com.webos.app.hdmi2"
+        d = _make(tv, _cfg(minutes=1.0))
+        d._idle_box["v"] = 0
+        d.tick()
+        assert d.config.device.input_id == "hdmi2"
+
+        # Off to the other computer; this one idles far past its timeout.
+        tv.foreground_app = "com.webos.app.hdmi4"
+        d._idle_box["v"] = 10 * 60
+        for _ in range(5):
+            _advance(d, 60)
+            d.tick()
+        assert tv.screen_on is True
+
+        # Back to this PC. The user hasn't touched this keyboard, so the OS
+        # still reports ten minutes idle - but they are plainly here.
+        tv.foreground_app = "com.webos.app.hdmi2"
+        _advance(d, 2)
+        d.tick()
+        assert tv.screen_on is True, "blanked the screen just after switching to it"
+        assert d.sleeps == 0
+
+
+def test_the_restarted_countdown_still_expires():
+    """Restarting the timer must not mean never blanking: switch back, walk away
+    without touching anything, and it should still go dark on schedule."""
+    with MockTV(require_pairing=False) as tv:
+        tv.foreground_app = "com.webos.app.hdmi2"
+        d = _make(tv, _cfg(minutes=1.0))
+        d._idle_box["v"] = 0
+        d.tick()
+
+        tv.foreground_app = "com.webos.app.hdmi4"
+        d._idle_box["v"] = 10 * 60
+        _advance(d, 300)
+        d.tick()
+
+        tv.foreground_app = "com.webos.app.hdmi2"   # switched back
+        _advance(d, 2)
+        d.tick()
+        assert tv.screen_on is True
+
+        _advance(d, 70)          # a full minute on screen, still untouched
+        d._idle_box["v"] += 70
+        d.tick()
+        assert tv.screen_on is False, "the restarted countdown never expired"
+        assert d.sleeps == 1
+
+
+def test_a_stale_reading_still_holds_the_screen():
+    """The sample is throttled, so the switch can be noticed late. Because the
+    baseline is pinned while hidden rather than on the switch itself, the last
+    thing known is 'not on screen' and blanking is held off regardless."""
+    with MockTV(require_pairing=False) as tv:
+        tv.foreground_app = "com.webos.app.hdmi2"
+        d = _make(tv, _cfg(minutes=1.0))
+        d._idle_box["v"] = 0
+        d.tick()
+
+        tv.foreground_app = "com.webos.app.hdmi4"
+        d._idle_box["v"] = 10 * 60
+        _advance(d, 120)
+        d.tick()
+
+        # Switch back and tick immediately, before any new sample is due.
+        tv.foreground_app = "com.webos.app.hdmi2"
+        _advance(d, 1)
+        d.tick()
+        assert tv.screen_on is True
+
+
+def test_being_switched_to_brings_a_blanked_screen_back():
+    """If this PC had blanked its own screen before the user went away, coming
+    back to its input should light it up, not leave them at a black panel."""
+    with MockTV(require_pairing=False) as tv:
+        tv.foreground_app = "com.webos.app.hdmi2"
+        d = _make(tv, _cfg(minutes=1.0))
+        d._idle_box["v"] = 0
+        d.tick()
+        d._idle_box["v"] = 120           # blanks while it is the one on screen
+        _advance(d, 60)
+        d.tick()
+        assert d.screen_state == STATE_OFF
+
+        tv.foreground_app = "com.webos.app.hdmi4"
+        _advance(d, 60)
+        d.tick()
+
+        tv.foreground_app = "com.webos.app.hdmi2"
+        _advance(d, 2)
+        d.tick()
+        assert tv.screen_on is True
+        assert d.screen_state == STATE_ON
+        assert d.wakes == 1
+
+
+def test_time_behind_another_input_is_not_held_against_a_single_pc_setup():
+    """With the guard off, nothing is capped - the plain OS idle timer rules."""
+    with MockTV(require_pairing=False) as tv:
+        tv.foreground_app = "com.webos.app.hdmi2"
+        cfg = _cfg(minutes=1.0)
+        cfg.device.input_id = "hdmi2"
+        cfg.only_my_input = False
+        d = _make(tv, cfg)
+        d._visible_since = 1000.0        # stale leftover from before it was off
+        d._idle_box["v"] = 120
+        d.tick()
+        assert tv.screen_on is False
 
 
 # ----- both machines running at once -----------------------------------

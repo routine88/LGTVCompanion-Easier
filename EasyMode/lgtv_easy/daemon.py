@@ -133,6 +133,10 @@ class Daemon:
         self._input_candidate = ""       # a rival input seen while the user is here
         self._input_candidate_since = 0.0
         self._skipped_input = ""         # last input we declined to act on (log once)
+        # When this PC last became the source on screen. Held at "now" for as
+        # long as the TV is showing something else (see _note_visibility), so
+        # the idle countdown starts from zero when the user switches back.
+        self._visible_since: Optional[float] = None
 
     # ----- TV connection ----------------------------------------------
     def _default_client_factory(self) -> WebOSClient:
@@ -312,7 +316,44 @@ class Daemon:
             return ""
         if seen:
             self._input_seen, self._input_seen_at = seen, now
+        self._note_visibility(seen)
         return seen
+
+    def _note_visibility(self, seen: str) -> None:
+        """Keep the idle countdown honest about being off screen.
+
+        While the TV is showing another source, this PC's idle timer is counting
+        something nobody can see, so the baseline is held at "now". The moment
+        the user switches back to this input the countdown therefore starts from
+        zero - which is what they expect, having just picked up the remote to
+        come here and use it.
+
+        Without this, a machine that sat idle for hours behind another input
+        blanked its screen a second or two after being switched to: it never
+        entered the off state (the guard kept refusing), so it was still sitting
+        at ON with a long-expired timer, and the instant the guard let go it
+        fired. The OS idle timer can't help - the user pressed the TV remote,
+        not this keyboard.
+
+        Pinning while hidden, rather than watching for the switch itself, is
+        what makes this robust to a stale reading: the last thing we knew was
+        "not on screen", so the baseline is recent and blanking is held off
+        either way. Erring towards a lit screen is the right direction.
+        """
+        mine = self.config.device.input_id
+        if not mine or not seen or seen == mine:
+            return
+        self._visible_since = self._clock()
+
+    def _effective_idle(self, raw_idle: float) -> float:
+        """How long the user has been away *from what is on the screen*.
+
+        Never longer than this PC has been the source on screen, so time spent
+        behind another input is not counted against the idle timeout.
+        """
+        if not self.config.only_my_input or self._visible_since is None:
+            return raw_idle
+        return min(raw_idle, self._clock() - self._visible_since)
 
     def _may_darken(self, client: WebOSClient, what: str,
                     max_age: float = INPUT_CACHE_SECONDS) -> bool:
@@ -671,14 +712,19 @@ class Daemon:
             if self.screen_state in (STATE_OFF, STATE_STANDBY):
                 self.wake_screen()
             return
-        idle = self._idle_fn()
         threshold = self.config.idle_seconds
+        # Raw OS idle drives the *learning* below: only real keyboard and mouse
+        # activity says the user is at THIS machine.
+        raw_idle = self._idle_fn()
         # Note which source the TV is showing before deciding anything - and,
         # while the user is here, take it as evidence of which one is us. Skipped
         # in standby: the TV is off the network there, and asking would only
         # trip the "can't connect" warning.
         if self.screen_state != STATE_STANDBY:
-            self._sample_input(active=idle < threshold)
+            self._sample_input(active=raw_idle < threshold)
+        # ...but every decision below runs on time-on-screen, which is what the
+        # user actually experiences (see _effective_idle).
+        idle = self._effective_idle(raw_idle)
         # Deep power-off only makes sense strictly after the screen-off stage,
         # and only if we can wake the TV again (Wake-on-LAN needs its MAC) -
         # otherwise it would switch off and never come back on its own.
