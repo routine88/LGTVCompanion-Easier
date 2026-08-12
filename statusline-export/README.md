@@ -8,6 +8,7 @@ terminal:
 ▍ model   Opus 4.8 (37% ctx) · MAX        model + context used + effort    (cyan · green→red · magenta→green)
 ▍ usage   35% 5h · 6% 7d                  both rate-limit windows          (each % green→yellow→orange→red)
 ▍ billing MONTHLY · Max                   subscription plan vs API billing (blue / amber)
+▍ git     main · rc:on                    branch + remote-control state    (purple · green/rose)
 ▍ folders ● ~/code/app                    every directory in scope         (steel blue / teal / slate)
 ▍         ◇ ~/code                          ◇ = launch dir, if you cd'd away
 ▍         ○ ~/notes                         ○ = added with /add-dir
@@ -16,6 +17,8 @@ terminal:
 ## Requirements
 
 - **Node.js** on your PATH (`node --version`). No other dependencies — it's plain Node, no npm install.
+- **git** on your PATH, for the branch half of the `git` line. Optional: without it, or outside a
+  repository, that half reads `— no repo` and everything else is unaffected.
 - The **usage** line only populates on a Claude.ai **Pro/Max** subscription, and only after the
   first API response in a session (before that it shows `n/a`).
 
@@ -104,6 +107,24 @@ terminal:
   4. Otherwise `— detecting` (e.g. before first login/API call)
 
   It only ever reads the **non-secret `subscriptionType`** field — never the token.
+
+- **git** pairs the branch with the remote-control indicator, because both answer "what am I
+  connected to?" and each is a single short token.
+
+  The **branch** is asked of git directly — Claude Code reports no branch on stdin (only
+  `worktree.branch`, and only for `--worktree` sessions), so the docs' own examples shell out too.
+  It runs with `--no-optional-locks`, so a render never blocks on or races another git process
+  holding the index lock, and through `execFileSync` rather than a shell, so a path containing a
+  space or a quote can't be misparsed. On a detached HEAD it shows the short SHA as `@a1b2c3d`
+  instead of going blank — mid-bisect is a different state from "not a repo", and they shouldn't
+  look alike.
+
+  **rc** always renders, on or off. An indicator that vanishes when inactive can't be checked at
+  a glance, which is the whole reason to have one. It is a **heuristic**: Claude Code exposes no
+  remote-control field on stdin or on disk, and the built-in footer indicator only appears while
+  connected. Each live session has `~/.claude/sessions/<pid>.json` keyed by `sessionId`, carrying
+  a `bridgeSessionId` only while remote control is active — so this matches the session id from
+  stdin to its file and reads that. Files that don't mention this session id are never parsed.
 
 - **folders** lists every directory the session can actually reach, from
   `workspace.current_dir`, `workspace.project_dir` and `workspace.added_dirs` — so `/add-dir`

@@ -8,6 +8,7 @@
 //   ▍ model   <display name (context % used) · live reasoning effort>
 //   ▍ usage   <5-hour % · 7-day %>
 //   ▍ billing <monthly subscription plan / per-token API>
+//   ▍ git     <current branch · remote-control state>
 //   ▍ folders <every directory this session can reach, one per line>
 //
 // Colors are 256-color ANSI chosen to stand out on a black background, with a
@@ -21,6 +22,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 // ---- ANSI helpers ----
 const ESC = '\x1b[';
@@ -37,6 +39,8 @@ const COLOR = {
   // "no effort reported", which is the one thing this palette exists to avoid.
   effort: { max: 201, xhigh: 205, high: 208, medium: 220, low: 46 },
   billing: { monthly: 39, api: 214, unknown: 245 },      // blue / amber / gray
+  git: 140,         // muted purple — distinct from the effort magentas above
+  rc: { on: 108, off: 131 },  // muted green / muted rose
   folderCwd: 111,   // light steel blue — where you are now
   folderRoot: 109,  // muted teal — where the session was launched
   folderAdded: 103, // slate gray-blue — reachable, but not the focus
@@ -189,6 +193,82 @@ function detectBilling(data) {
   return { color: COLOR.billing.unknown, value: '—', note: 'detecting' };
 }
 
+// ---- git + remote control -------------------------------------------------
+
+// Current branch, asked of git itself: Claude Code reports no branch on stdin
+// (only `worktree.branch`, and only for `--worktree` sessions), and the docs'
+// own examples shell out the same way.
+//
+// --no-optional-locks so a render can never block on, or race, another git
+// process holding the index lock. execFileSync rather than execSync keeps the
+// path out of a shell, so a directory containing a space or a quote can't be
+// misparsed. Everything is best-effort: outside a repo, or with no git on PATH,
+// this returns null and the segment says so rather than erroring.
+function git(cwd, args) {
+  try {
+    return execFileSync('git', ['--no-optional-locks', '-C', cwd].concat(args), {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 1000,
+    }).trim();
+  } catch (_) { return ''; }
+}
+
+function gitBranch(cwd) {
+  if (!cwd) return null;
+  const branch = git(cwd, ['branch', '--show-current']);
+  if (branch) return branch;
+  // Empty means a detached HEAD (or not a repo). Fall back to the short SHA so
+  // the segment still identifies where you are - a blank branch during a
+  // bisect or a checked-out tag reads as "no repo", which is a different thing.
+  const sha = git(cwd, ['rev-parse', '--short', 'HEAD']);
+  return sha ? `@${sha}` : null;
+}
+
+// Remote-control state. Claude Code exposes NO rc field on the status-line
+// stdin payload or anywhere else on disk (the built-in footer indicator only
+// appears while connected, so it can't back an always-visible segment). This is
+// a HEURISTIC: each live session has ~/.claude/sessions/<pid>.json keyed by
+// `sessionId`, which carries a `bridgeSessionId` (the claude.ai/code bridge
+// link) only while remote control is active. Match this session's id to its
+// file and treat a non-empty bridge id as on.
+//
+// The substring check before JSON.parse is the cheap prefilter the shell
+// version got from `grep -l`: session ids are UUIDs and won't collide, so a
+// file that doesn't mention this one is never worth parsing.
+function remoteControlOn(sessionId) {
+  if (!sessionId) return false;
+  let files;
+  try { files = fs.readdirSync(path.join(CLAUDE_DIR, 'sessions')); } catch (_) { return false; }
+  for (const f of files) {
+    if (!f.endsWith('.json')) continue;
+    try {
+      const raw = fs.readFileSync(path.join(CLAUDE_DIR, 'sessions', f), 'utf8');
+      if (!raw.includes(sessionId)) continue;
+      const s = JSON.parse(raw);
+      if (s.sessionId === sessionId) return Boolean(s.bridgeSessionId);
+    } catch (_) { /* unreadable or half-written file — just try the next */ }
+  }
+  return false;
+}
+
+// Branch and rc share a line because both answer "what am I connected to?" and
+// each is a single short token. rc always renders, on or off: an indicator that
+// disappears when inactive can't be checked at a glance, which is the entire
+// point of having it. The branch may legitimately be absent, so it says so.
+function gitLine(data) {
+  const ws = data.workspace || {};
+  const branch = gitBranch(ws.current_dir || data.cwd || '');
+  const on = remoteControlOn(data.session_id);
+
+  const branchText = branch
+    ? `${BOLD}${fg(COLOR.git)}${branch}${RESET}`
+    : `${fg(COLOR.label)}— no repo${RESET}`;
+  const rcText = `${fg(COLOR.rc[on ? 'on' : 'off'])}rc:${on ? 'on' : 'off'}${RESET}`;
+
+  return line(COLOR.git, 'git', `${branchText} ${fg(COLOR.label)}·${RESET} ${rcText}`);
+}
+
 // ---- folders -------------------------------------------------------------
 
 // Longest path we will print. Past this the HEAD is dropped, not the tail:
@@ -325,7 +405,10 @@ function main() {
     + (b.note ? ` ${fg(COLOR.label)}· ${b.note}${RESET}` : '');
   out.push(line(b.color, 'billing', billValue));
 
-  // 4) FOLDERS — variable height, so it goes last (see the header note)
+  // 4) GIT — branch + remote-control state
+  out.push(gitLine(data));
+
+  // 5) FOLDERS — variable height, so it goes last (see the header note)
   for (const l of folderLines(data)) out.push(l);
 
   process.stdout.write(out.join('\n'));
