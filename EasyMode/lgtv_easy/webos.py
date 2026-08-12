@@ -44,6 +44,22 @@ def normalize_input_id(app_id: str) -> str:
     return app
 
 
+def input_label(input_id: str) -> str:
+    """Human name for a source id, the way the TV's own input menu writes it.
+
+    ``hdmi2`` -> ``HDMI 2``, ``livetv`` -> ``Live TV``. Anything unrecognised is
+    handed back as-is rather than mangled, since the TV is free to invent ids.
+    """
+    import re
+    if not input_id:
+        return ""
+    m = re.fullmatch(r"hdmi\s*(\d+)", input_id)
+    if m:
+        return f"HDMI {m.group(1)}"
+    return {"livetv": "Live TV", "netflix": "Netflix",
+            "youtube": "YouTube"}.get(input_id, input_id)
+
+
 def is_external_input(input_id: str) -> bool:
     """True when a source is a physical socket, so a PC could be behind it.
 

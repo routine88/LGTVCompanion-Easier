@@ -36,6 +36,10 @@ from .webos import WebOSClient, pair_with_fallback
 
 PAD = 14
 
+# How often the settings panel re-reads the config file to notice what a
+# background watcher has learned (e.g. which input this PC is on).
+INPUT_POLL_MS = 2000
+
 # Flat dark palette. Kept in one place so every widget pulls the same colours.
 PALETTE = {
     "bg":        "#15171C",   # window background
@@ -100,6 +104,11 @@ def _apply_theme(root: tk.Misc) -> dict:
     style.configure("CardTitle.TLabel", background=P["surface"], foreground=P["text"],
                     font=(ui, 11, "bold"))
     style.configure("CardMuted.TLabel", background=P["surface"], foreground=P["muted"],
+                    font=(ui, 9))
+    # Settled/confirmed sub-state on a card, e.g. "this PC is on HDMI 2". Green
+    # so "it worked it out" is distinguishable at a glance from the muted grey
+    # of "still working it out".
+    style.configure("CardOk.TLabel", background=P["surface"], foreground=P["ok"],
                     font=(ui, 9))
     style.configure("Value.TLabel", background=P["surface"], foreground=P["accent"],
                     font=(ui, 24, "bold"))
@@ -889,6 +898,16 @@ class SettingsPanel(ttk.Frame):
             self._apply,
             desc="Leaves the TV alone when another computer or a TV app is on "
                  "screen. Turn off only if this PC's input is misdetected.")
+        # Live read-out of the input learning, indented under its toggle. Which
+        # socket this PC is on is worked out from the TV rather than configured,
+        # and until this line existed there was no way to see whether that had
+        # happened - so "it isn't blanking" and "it hasn't learned yet" looked
+        # identical from the window.
+        self._input_line = ttk.Label(opts, style="CardMuted.TLabel",
+                                     wraplength=380, justify="left")
+        self._input_line.pack(anchor="w", padx=(0, 0), pady=(0, 4))
+        self._refresh_input_line()
+        self._watch_input()
 
         # More options: energy saving + start at login. The "Power off after"
         # slider only makes sense once deep power-off is on, so it's revealed with
@@ -916,6 +935,80 @@ class SettingsPanel(ttk.Frame):
         self._refresh_status()
         self._kickoff_selftest()
 
+    # ----- which input this PC is on -----------------------------------
+    def _adopt_learned_device(self) -> bool:
+        """Pull in what the watcher has learned about the TV since we loaded.
+
+        The daemon works things out at runtime - the TV's address, its MAC, and
+        which input this PC occupies - and persists them itself. ``App.cfg`` is
+        loaded once at startup, so when the watcher is a separate background
+        process (the normal case) nothing here ever hears about it. Two things
+        then go wrong: this panel shows stale state, and saving any setting from
+        this window writes our empty fields back over what was learned.
+
+        ``input_id`` takes the file's value outright - the daemon is the only
+        thing that sets it, and it may legitimately change when a cable moves.
+        The rest only fill blanks, so a value the user actually edited still
+        wins. Returns True if anything changed, so the caller can redraw.
+        """
+        try:
+            disk = Config.load()
+        except Exception:  # noqa: BLE001 - unreadable or half-written file
+            return False
+        live = self.app.cfg.device
+        changed = False
+        if disk.device.input_id != live.input_id:
+            live.input_id = disk.device.input_id
+            changed = True
+        for name in ("ip", "mac", "key"):
+            value = getattr(disk.device, name)
+            if value and not getattr(live, name):
+                setattr(live, name, value)
+                changed = True
+        if disk.device.secure and not live.secure:
+            live.secure = True
+            changed = True
+        return changed
+
+    def _refresh_input_line(self):
+        """Render the three states of the input guard: off, learning, learned."""
+        line = getattr(self, "_input_line", None)
+        if line is None:
+            return
+        from .webos import input_label
+        input_id = self.app.cfg.device.input_id
+        if not self.only_mine.get():
+            text = ("Off — the TV is controlled whatever it happens to be showing."
+                    if not input_id else
+                    f"Off — ignoring that this PC is on {input_label(input_id)}.")
+            style = "CardMuted.TLabel"
+        elif input_id:
+            text = f"✓ Learned — this PC is on {input_label(input_id)}."
+            style = "CardOk.TLabel"
+        else:
+            text = ("Learning… picked up the first time you use this PC while "
+                    "the TV is showing it.")
+            style = "CardMuted.TLabel"
+        try:
+            line.config(text=text, style=style)
+        except tk.TclError:
+            pass
+
+    def _watch_input(self):
+        """Re-read the config so the line above goes live.
+
+        The learning happens inside the daemon and lands in the config file, so
+        for a background watcher a periodic re-read is the only way this window
+        can see it happen. One small JSON file every couple of seconds, and only
+        while the panel is on screen.
+        """
+        if not self.winfo_exists():
+            return  # panel swapped out (re-run setup) - stop the timer
+        if self._adopt_learned_device():
+            self._refresh_input_line()
+            self._refresh_conn_label()
+        self.after(INPUT_POLL_MS, self._watch_input)
+
     def _sync_deep_row(self):
         """Show the power-off timing slider iff deep power-off is enabled."""
         if self.deep.get():
@@ -930,6 +1023,10 @@ class SettingsPanel(ttk.Frame):
 
     def _apply(self):
         cfg = self.app.cfg
+        # Take on anything the watcher learned since this window opened, so the
+        # save below carries it forward instead of writing our older, emptier
+        # copy of the TV's details back over it.
+        self._adopt_learned_device()
         cfg.idle_enabled = self.enabled.get()
         cfg.idle_minutes = self.sleep_slider.value() / 60.0
         cfg.mute_on_sleep = self.mute.get()
@@ -938,6 +1035,7 @@ class SettingsPanel(ttk.Frame):
         cfg.deep_off_enabled = self.deep.get()
         cfg.deep_off_minutes = self.deep_slider.value() / 60.0
         cfg.save()
+        self._refresh_input_line()  # the guard toggle changes what this says
         self.app.start_daemon()
         self.app.notify_running_daemon()
         self._refresh_status()
@@ -976,11 +1074,19 @@ class SettingsPanel(ttk.Frame):
 
         def worker():
             from .recovery import connect_tv
-            ok, err = True, ""
+            ok, err, showing = True, "", None
             client = None
             try:
                 # connect_tv heals a stale IP (DHCP moved the TV) before testing.
                 client = connect_tv(cfg, log=lambda _m: None)
+                # Ask what's on screen while we're connected. It's the one thing
+                # the config can't tell you, and it's how you find out whether
+                # this panel can see other computers at all - some older ones
+                # won't answer, and then the guard can never engage.
+                try:
+                    showing = client.get_foreground_input()
+                except Exception:  # noqa: BLE001 - the blink still matters
+                    showing = None
                 client.screen_off()
                 import time
                 time.sleep(2)
@@ -990,16 +1096,27 @@ class SettingsPanel(ttk.Frame):
             finally:
                 if client is not None:
                     client.close()
-            self.app.post(lambda: self._test_done(ok, err))
+            self.app.post(lambda: self._test_done(ok, err, showing))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _test_done(self, ok, err):
+    def _test_done(self, ok, err, showing=None):
         if ok:
             # cfg.device.ip may have just been corrected by the recovery step.
             self._refresh_conn_label()
+            from .webos import input_label
+            if showing:
+                extra = f" It's showing {input_label(showing)}."
+            elif showing == "":
+                # Answered, but wouldn't say. Worth stating plainly: it means the
+                # "only when it's showing this PC" guard can never take effect.
+                extra = (" It won't say which input it's on, so Easy Mode can't "
+                         "tell when another computer is on screen.")
+            else:
+                extra = ""
             self.status.config(
-                text=f"Test OK — your TV responded at {self.app.cfg.device.ip}. ✓")
+                text=f"Test OK — your TV responded at {self.app.cfg.device.ip}. ✓"
+                     f"{extra}")
             self._refresh_status()
         else:
             # Don't dead-end on the raw error (the reported bug): open a repair

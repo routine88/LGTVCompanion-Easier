@@ -293,7 +293,9 @@ def cmd_status(args) -> int:
     _print(f"  PC sleep    : {'ON' if cfg.screen_off_on_pc_sleep else 'OFF'} "
            "(screen follows the PC into sleep and back)")
     if cfg.only_my_input:
-        where = cfg.device.input_id or "(learning - not seen yet)"
+        from .webos import input_label
+        where = (input_label(cfg.device.input_id) if cfg.device.input_id
+                 else "(learning - not seen yet)")
         _print(f"  This PC's in: {where}  (the TV is left alone whenever it's "
                "showing another source)")
     else:
