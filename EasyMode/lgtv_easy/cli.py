@@ -31,6 +31,111 @@ def _print(msg: str = "") -> None:
     print(msg, flush=True)
 
 
+# ----- "no TV configured" warning ------------------------------------------
+# The failure this exists to prevent: Easy Mode sitting there running, doing
+# absolutely nothing, because there is no TV to drive - and never saying so. It
+# is the one state where every command should shout rather than mention.
+
+def _colour_ok() -> bool:
+    """True if it's safe to emit ANSI colour on this stdout.
+
+    Honours NO_COLOR, skips redirected output, and switches the legacy Windows
+    console into VT mode (Windows Terminal already is; conhost is not, and would
+    otherwise print the escape codes literally).
+    """
+    import os
+    if os.environ.get("NO_COLOR"):
+        return False
+    stream = sys.stdout
+    if stream is None or not hasattr(stream, "isatty") or not stream.isatty():
+        return False
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        # 0x0004 = ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        return bool(kernel32.SetConsoleMode(handle, mode.value | 0x0004))
+    except Exception:  # noqa: BLE001 - no console, or an old Windows build
+        return False
+
+
+def _red(text: str) -> str:
+    return f"\033[1;31m{text}\033[0m" if _colour_ok() else text
+
+
+# Kept ASCII on purpose: this banner has to survive a legacy cp437/cp1252
+# console, which is exactly where a confused user ends up reading it.
+def warn_no_tv(cfg, action: str = "") -> None:
+    """Print the loud red 'there is no TV' banner. ``action`` names what is
+    being skipped because of it, e.g. 'The watcher will not start'."""
+    reason = cfg.unconfigured_reason()
+    if reason is None:
+        return
+    rule = "=" * 68
+    _print(_red(rule))
+    _print(_red("  NO TV IS SET UP  -  Easy Mode has nothing to control."))
+    _print(_red(f"  {reason}"))
+    if action:
+        _print(_red(f"  {action}"))
+    _print(_red("  Set one up with:  lgtv-easy gui        (guided setup)"))
+    _print(_red("                    lgtv-easy pair <ip>  (if you know the IP)"))
+    _print(_red(rule))
+
+
+def _has_console() -> bool:
+    """False when nobody can read what we print.
+
+    Both auto-start paths land here, for different reasons:
+
+    * Windows: the Startup entry runs ``pythonw`` so no console window flashes,
+      which leaves ``sys.stdout`` as None outright.
+    * Linux: the ``.desktop`` entry sets ``Terminal=false``, so stdout is a real
+      file descriptor - pointing at the journal or ~/.xsession-errors, where no
+      user will ever see it. Testing for None alone would wrongly conclude
+      somebody is watching.
+
+    So the question is whether stdout is a terminal, not whether it exists.
+    """
+    stream = sys.stdout
+    if stream is None:
+        return False
+    try:
+        return bool(stream.isatty())
+    except Exception:  # noqa: BLE001 - a detached or dummy stream
+        return False
+
+
+def _has_display() -> bool:
+    """True if there is a desktop session that could show a window at all."""
+    import os
+    if os.name == "nt":
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _alert_no_tv(reason: str) -> None:
+    """Best-effort on-screen 'no TV is set up' window. Never raises.
+
+    Skipped when LGTV_EASY_NO_ALERT=1 (tests, headless CI) or when there is no
+    display / no tkinter - a missing warning must never take the process down.
+    """
+    import os
+    if os.environ.get("LGTV_EASY_NO_ALERT") == "1":
+        return
+    if not _has_display():
+        return
+    try:
+        from .gui import show_no_tv_alert
+        show_no_tv_alert(reason)
+    except Exception:  # noqa: BLE001 - no display, no tk, no window manager
+        pass
+
+
 def cmd_scan(args) -> int:
     from .discovery import discover_tvs
     _print("Scanning the network for LG TVs (a few seconds)...")
@@ -167,6 +272,9 @@ def _signal_running_daemon() -> bool:
 def cmd_status(args) -> int:
     cfg = Config.load()
     _print(f"LGTV Companion Easy Mode {__version__}")
+    # Lead with it: "no TV" makes every line below meaningless, so it must not
+    # be one more row in the list the way it used to be.
+    warn_no_tv(cfg, action="Nothing below will have any effect until one is.")
     _print(f"  Config file : {config_path()}")
     _print(f"  Log file    : {log_path()}")
     _print(f"  Setup done  : {cfg.setup_complete}")
@@ -208,7 +316,7 @@ def cmd_status(args) -> int:
 def cmd_test(args) -> int:
     cfg = Config.load()
     if not cfg.device.ip and not cfg.device.mac:
-        _print("No TV configured. Run 'lgtv-easy pair <ip>' first.")
+        warn_no_tv(cfg, action="There is nothing to test.")
         return 1
     from .recovery import connect_tv
     try:
@@ -297,7 +405,7 @@ def cmd_repair(args) -> int:
     """
     cfg = Config.load()
     if not cfg.device.ip and not cfg.device.mac:
-        _print("No TV configured yet. Run the wizard or 'lgtv-easy pair <ip>'.")
+        warn_no_tv(cfg, action="There is nothing to repair.")
         return 1
     from . import selfheal
     _print("Running a connection self-test and repair...")
@@ -413,8 +521,20 @@ def cmd_on(args) -> int:
 
 def cmd_run(args) -> int:
     cfg = Config.load()
-    if not cfg.device.ip:
-        _print("No TV configured yet. Run the wizard or 'lgtv-easy pair <ip>'.")
+    reason = cfg.unconfigured_reason()
+    if reason is not None:
+        # This is the path that used to fail invisibly. At login the watcher is
+        # started by pythonw from the Startup folder, with no console attached:
+        # the old _print went nowhere, the process exited 1, and the user was
+        # left with an app that had silently never done anything. So record it
+        # in the log file, and when there is no console to print to, say it on
+        # screen instead.
+        warn_no_tv(cfg, action="The idle watcher will NOT start.")
+        from .applog import get_logger
+        get_logger().warning(
+            "Watcher not started: %s Set a TV up with 'lgtv-easy gui'.", reason)
+        if not _has_console():
+            _alert_no_tv(reason)
         return 1
     # Only one daemon should drive the TV. A supervised child (LGTV_EASY_WAIT_LOCK)
     # waits its turn; a manual run exits politely if one is already going.
@@ -527,6 +647,10 @@ def cmd_autostart(args) -> int:
             _print(f"Could not enable auto-start: {exc}")
             return 1
         _print(f"Auto-start at login ENABLED via {path}")
+        # Arming auto-start with no TV saved is how you end up with an app that
+        # launches every login and silently does nothing at all.
+        warn_no_tv(Config.load(),
+                   action="At login the watcher will start and exit immediately.")
     elif action == "disable":
         autostart.disable()
         _print("Auto-start at login DISABLED.")
