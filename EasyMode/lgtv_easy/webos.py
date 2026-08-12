@@ -21,6 +21,36 @@ URI_SET_MUTE = "ssap://audio/setMute"
 URI_CREATE_TOAST = "ssap://system.notifications/createToast"
 URI_GET_NETWORK_STATUS = "ssap://com.webos.service.connectionmanager/getStatus"
 URI_GET_SW_INFO = "ssap://com.webos.service.update/getCurrentSWInformation"
+URI_GET_FOREGROUND_APP = "ssap://com.webos.applicationManager/getForegroundAppInfo"
+
+# WebOS names every source - a socket on the back or one of the TV's own apps -
+# with an appId. The sockets look like "com.webos.app.hdmi2"; the built-in apps
+# look like "com.webos.app.livetv" or plain "netflix".
+_APP_PREFIX = "com.webos.app."
+# Prefixes of the sources a PC can actually be plugged into, i.e. the only ones
+# that could be "this computer".
+_EXTERNAL_PREFIXES = ("hdmi", "externalinput", "component", "av")
+
+
+def normalize_input_id(app_id: str) -> str:
+    """Reduce a WebOS appId to the short source id Easy Mode compares on.
+
+    ``com.webos.app.hdmi2`` -> ``hdmi2``, ``com.webos.app.livetv`` -> ``livetv``,
+    ``netflix`` -> ``netflix``. Returns '' for an empty or missing app.
+    """
+    app = (app_id or "").strip().lower()
+    if app.startswith(_APP_PREFIX):
+        app = app[len(_APP_PREFIX):]
+    return app
+
+
+def is_external_input(input_id: str) -> bool:
+    """True when a source is a physical socket, so a PC could be behind it.
+
+    The TV's own apps (Netflix, live TV) are never this computer, so they must
+    never be adopted as "my input".
+    """
+    return bool(input_id) and input_id.startswith(_EXTERNAL_PREFIXES)
 
 
 def _normalize_mac(mac: str) -> str:
@@ -238,6 +268,17 @@ class WebOSClient:
 
     def get_power_state(self) -> Optional[dict]:
         return self.request(URI_GET_POWER_STATE)
+
+    def get_foreground_input(self) -> str:
+        """Which source the TV is showing right now: 'hdmi2', 'netflix', ...
+
+        Returns '' when the TV doesn't say - older firmware, a panel that
+        refuses the request, or nothing in the foreground. Callers must read
+        that as "unknown", never as "not this PC". Raises on a dead socket, so
+        the caller can drop and reconnect.
+        """
+        payload = (self.request(URI_GET_FOREGROUND_APP) or {}).get("payload", {})
+        return normalize_input_id(payload.get("appId", ""))
 
     def toast(self, message: str) -> Optional[dict]:
         return self.request(URI_CREATE_TOAST, {"message": message})

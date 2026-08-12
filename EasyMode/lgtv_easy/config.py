@@ -59,6 +59,10 @@ class Device:
     # Which WebSocket the TV actually accepts: False = ws://:3000,
     # True = wss://:3001. Newer panels (C2 etc.) only allow the secure one.
     secure: bool = False
+    # Which of the TV's sockets this PC is plugged into ('hdmi2', ...). Learned
+    # from the TV - it's whatever is on screen while this PC's user is at the
+    # keyboard - so nothing has to be configured. Empty until learned.
+    input_id: str = ""
 
     @property
     def paired(self) -> bool:
@@ -87,6 +91,13 @@ class Config:
     # screen off too (and bring it back when the PC resumes), the way a desk
     # monitor goes dark with the PC. Independent of the idle timeout above.
     screen_off_on_pc_sleep: bool = True
+    # Only darken the TV while it is actually showing this PC. Two computers
+    # plugged into the same TV both run their own copy of Easy Mode; without
+    # this, whichever one goes idle first blanks the panel out from under the
+    # one that's on screen. Also stops an idle PC from blanking the TV mid-film
+    # when someone is watching Netflix on it. Turn off only if the input
+    # detection misreads your setup.
+    only_my_input: bool = True
     # True once the setup wizard has completed successfully.
     setup_complete: bool = False
     device: Device = field(default_factory=Device)

@@ -26,6 +26,10 @@ class MockTV:
         self.screen_on = True
         self.muted = False
         self.powered_on = True
+        # Which source the TV is showing. Tests flip this to simulate the user
+        # switching the TV to another computer's HDMI socket. '' means the panel
+        # won't say (older firmware), which the app treats as "unknown".
+        self.foreground_app = "com.webos.app.hdmi1"
         self.pair_prompts = 0
         self.requests: list = []
         self._srv: Optional[socket.socket] = None
@@ -130,6 +134,8 @@ class MockTV:
             self.muted = bool(msg.get("payload", {}).get("mute"))
         elif uri.endswith("getPowerState"):
             payload_out["state"] = "Active" if self.powered_on else "Suspend"
+        elif uri.endswith("getForegroundAppInfo"):
+            payload_out["appId"] = self.foreground_app
         ws.send_text(json.dumps({
             "type": "response", "id": msg.get("id"), "payload": payload_out,
         }))

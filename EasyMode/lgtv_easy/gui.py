@@ -705,6 +705,7 @@ class SettingsPanel(ttk.Frame):
         self.mute = tk.BooleanVar(value=cfg.mute_on_sleep)
         self.follow_sleep = tk.BooleanVar(value=cfg.screen_off_on_pc_sleep)
         self.deep = tk.BooleanVar(value=cfg.deep_off_enabled)
+        self.only_mine = tk.BooleanVar(value=cfg.only_my_input)
         self.autostart = tk.BooleanVar(value=autostart_mod.is_enabled())
         self._status_dot = None
         self._build()
@@ -784,6 +785,11 @@ class SettingsPanel(ttk.Frame):
         self._switch_row(opts, "Sleep the TV when the PC sleeps",
                          self.follow_sleep, self._apply,
                          desc="Follows the PC into and back out of suspend.")
+        self._switch_row(
+            opts, "Only when the TV is showing this PC", self.only_mine,
+            self._apply,
+            desc="Leaves the TV alone when another computer or a TV app is on "
+                 "screen. Turn off only if this PC's input is misdetected.")
 
         # More options: energy saving + start at login. The "Power off after"
         # slider only makes sense once deep power-off is on, so it's revealed with
@@ -829,6 +835,7 @@ class SettingsPanel(ttk.Frame):
         cfg.idle_minutes = self.sleep_slider.value() / 60.0
         cfg.mute_on_sleep = self.mute.get()
         cfg.screen_off_on_pc_sleep = self.follow_sleep.get()
+        cfg.only_my_input = self.only_mine.get()
         cfg.deep_off_enabled = self.deep.get()
         cfg.deep_off_minutes = self.deep_slider.value() / 60.0
         cfg.save()

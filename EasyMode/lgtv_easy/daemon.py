@@ -46,6 +46,19 @@ RECONNECT_BACKOFF_MAX = 300.0  # seconds (5 min between attempts at most)
 # no WoL, stays on). Generous so a merely slow wake never trips it.
 DEEP_WAKE_GIVEUP_SECONDS = 90.0
 
+# Screen ownership. Two PCs plugged into the same TV each run their own copy of
+# Easy Mode, and the TV can only show one of them at a time. So before darkening
+# anything we ask the TV which source is actually on screen, and act only when
+# it's ours. Which socket is "ours" is learned from the TV rather than
+# configured: it's whatever is on screen while this PC's user is at the keyboard.
+INPUT_SAMPLE_SECONDS = 10.0    # don't ask the TV more often than this
+INPUT_CACHE_SECONDS = 30.0     # how long a sample stays usable as "what's on now"
+# How long a *different* input must hold, across active use, before we accept
+# that this PC has been moved to another socket. Long enough that working at
+# this PC for a while with the other machine on screen (a second monitor on the
+# desk) can't hand ownership of the panel to the wrong computer.
+INPUT_RELEARN_SECONDS = 900.0
+
 
 class Daemon:
     def __init__(
@@ -113,6 +126,13 @@ class Daemon:
         # Set once the OS shutdown handler has (attempted to) power the TV off, so
         # the CLI's SIGTERM fallback doesn't fire a second, redundant power-off.
         self._shutdown_handled = False
+        # Screen-ownership state (see the INPUT_* constants).
+        self._input_seen = ""            # last source the TV reported showing
+        self._input_seen_at = 0.0        # when, on the monotonic clock
+        self._next_input_sample_at = 0.0
+        self._input_candidate = ""       # a rival input seen while the user is here
+        self._input_candidate_since = 0.0
+        self._skipped_input = ""         # last input we declined to act on (log once)
 
     # ----- TV connection ----------------------------------------------
     def _default_client_factory(self) -> WebOSClient:
@@ -267,6 +287,124 @@ class Daemon:
                 pass
         self._client = None
 
+    # ----- who is on screen --------------------------------------------
+    def _read_input(self, client: WebOSClient, max_age: float) -> str:
+        """The source the TV is showing: 'hdmi2', 'netflix', or '' if unknown.
+
+        A sample no older than ``max_age`` seconds is reused instead of asking
+        again, which is what lets the PC-suspend path decide without a round
+        trip - there the network can vanish within tens of milliseconds. The
+        idle loop refreshes the sample every tick, so the cached answer is
+        normally only a poll interval old.
+
+        Callers must hold ``_action_lock``.
+        """
+        now = self._clock()
+        if self._input_seen and now - self._input_seen_at <= max_age:
+            return self._input_seen
+        try:
+            seen = client.get_foreground_input()
+        except Exception as exc:  # noqa: BLE001 - unknown is a valid answer
+            # Don't drop the client here: the caller is usually about to use it,
+            # and a failure there handles the reconnect. Not knowing which input
+            # is up just means we fall back to acting, as we always used to.
+            self.logger.debug("Could not read the TV's current source: %s", exc)
+            return ""
+        if seen:
+            self._input_seen, self._input_seen_at = seen, now
+        return seen
+
+    def _may_darken(self, client: WebOSClient, what: str,
+                    max_age: float = INPUT_CACHE_SECONDS) -> bool:
+        """Is it our business to darken the TV right now?
+
+        No, when the TV is showing a different source - another computer on a
+        second HDMI socket, or one of the TV's own apps. That is the two-PC bug
+        this exists for: both machines run Easy Mode, and whichever went idle
+        first used to blank the panel while the other one was on screen and in
+        use.
+
+        Fails open (yes) whenever the answer isn't known - the guard is off, we
+        haven't learned this PC's input yet, or the TV won't say - so a single-PC
+        setup behaves exactly as it did before.
+        """
+        if not self.config.only_my_input:
+            return True
+        mine = self.config.device.input_id
+        if not mine:
+            return True
+        seen = self._read_input(client, max_age)
+        if not seen or seen == mine:
+            self._skipped_input = ""
+            return True
+        if seen != self._skipped_input:
+            self._skipped_input = seen
+            self.logger.info(
+                "Not %s: the TV is showing %s and this PC is on %s. Another "
+                "source is on screen, so leaving the TV alone.", what, seen, mine)
+        return False
+
+    def _sample_input(self, active: bool) -> None:
+        """Refresh - and while the user is here, learn from - the TV's source.
+
+        Throttled to INPUT_SAMPLE_SECONDS so the idle loop costs one small
+        request every few polls, and skipped entirely when the guard is off.
+        Uses the ordinary (backed-off) connect, so an unreachable TV doesn't
+        turn this into a connect storm.
+        """
+        if not self.config.only_my_input:
+            return
+        now = self._clock()
+        if now < self._next_input_sample_at:
+            return
+        self._next_input_sample_at = now + max(self.config.poll_seconds,
+                                               INPUT_SAMPLE_SECONDS)
+        with self._action_lock:
+            client = self._ensure_client()
+            if not client:
+                return
+            seen = self._read_input(client, max_age=0.0)
+            if seen and active and self.screen_state == STATE_ON:
+                self._learn_input(seen)
+
+    def _learn_input(self, seen: str) -> None:
+        """Work out which socket this PC occupies, from the TV itself.
+
+        The rule: whatever the TV is showing while this PC's user is actually at
+        the keyboard is this PC. Nothing to configure, and it still follows a
+        cable moved to a different socket - but only once the new input has held
+        for INPUT_RELEARN_SECONDS of active use, so a stretch of typing here
+        while the other machine is on screen can't quietly steal the panel.
+        """
+        from .webos import is_external_input
+        if not is_external_input(seen):
+            return  # a TV app (Netflix, live TV) is never this computer
+        mine = self.config.device.input_id
+        if seen == mine:
+            self._input_candidate = ""
+            return
+        if not mine:
+            self._adopt_input(seen, "learned from the TV")
+            return
+        now = self._clock()
+        if seen != self._input_candidate:
+            self._input_candidate, self._input_candidate_since = seen, now
+            return
+        if now - self._input_candidate_since >= INPUT_RELEARN_SECONDS:
+            self._adopt_input(seen, f"moved from {mine}")
+
+    def _adopt_input(self, seen: str, how: str) -> None:
+        self.config.device.input_id = seen
+        self._input_candidate = ""
+        self._skipped_input = ""
+        try:
+            self.config.save()
+        except Exception:  # noqa: BLE001 - persistence is best-effort
+            pass
+        self.logger.info(
+            "This PC is on the TV's %s input (%s). Easy Mode will now leave the "
+            "TV alone whenever it's showing something else.", seen, how)
+
     # ----- actions -----------------------------------------------------
     def sleep_screen(self, *, force: bool = False, reason: str = "") -> bool:
         """Blank the TV screen.
@@ -289,6 +427,14 @@ class Daemon:
                         "Could not turn the TV screen off%s: the TV is "
                         "unreachable (off, or not found on the network).",
                         f" ({reason})" if reason else "")
+                return False
+            # The idle path asks the TV afresh (the sample the tick just took
+            # counts, so this is usually free) - it has the time, and a stale
+            # answer here means blanking the wrong computer. The PC-sleep path
+            # takes the last sample instead: the network is about to disappear,
+            # and a few seconds old is close enough.
+            if not self._may_darken(client, "turning the TV screen off",
+                                    INPUT_CACHE_SECONDS if force else 0.0):
                 return False
             try:
                 # On the PC-sleep path fire the screen-off without waiting for the
@@ -330,6 +476,10 @@ class Daemon:
                         "Could not power the TV off%s: the TV is unreachable "
                         "(off, or not found on the network).",
                         f" ({reason})" if reason else "")
+                return False
+            # Always ask afresh: cutting the whole TV is the destructive one, and
+            # even the shutdown path (logind's delay window) has time for it.
+            if not self._may_darken(client, "powering the TV off", 0.0):
                 return False
             try:
                 client.power_off()
@@ -376,6 +526,11 @@ class Daemon:
             send_wol(mac, broadcast=targets)
 
     def wake_screen(self) -> bool:
+        """Bring the screen back. Deliberately *not* gated on which input is
+        showing, unlike the actions that darken the TV: the costs are lopsided.
+        Turning on a TV that is already on, or that is showing the other
+        computer, is a no-op or a mild surprise; refusing to turn one on leaves
+        someone staring at a black panel wondering what broke."""
         with self._action_lock:
             # If the panel went into full standby it needs a magic packet to come
             # back; a sustained burst when deep so a sleeping Wi-Fi/mesh TV
@@ -518,6 +673,12 @@ class Daemon:
             return
         idle = self._idle_fn()
         threshold = self.config.idle_seconds
+        # Note which source the TV is showing before deciding anything - and,
+        # while the user is here, take it as evidence of which one is us. Skipped
+        # in standby: the TV is off the network there, and asking would only
+        # trip the "can't connect" warning.
+        if self.screen_state != STATE_STANDBY:
+            self._sample_input(active=idle < threshold)
         # Deep power-off only makes sense strictly after the screen-off stage,
         # and only if we can wake the TV again (Wake-on-LAN needs its MAC) -
         # otherwise it would switch off and never come back on its own.
@@ -688,6 +849,7 @@ class Daemon:
         dev.key = dev.key or live.key
         dev.name = dev.name or live.name
         dev.secure = dev.secure or live.secure
+        dev.input_id = dev.input_id or live.input_id
         with self._action_lock:
             old, self.config = self.config, fresh
         if (fresh.idle_enabled, fresh.idle_minutes, fresh.deep_off_enabled,

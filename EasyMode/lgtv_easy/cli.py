@@ -136,6 +136,15 @@ def cmd_set(args) -> int:
     if args.mac is not None:
         cfg.device.mac = args.mac
         changed.append(f"mac={args.mac}")
+    if args.only_my_input is not None:
+        cfg.only_my_input = args.only_my_input
+        changed.append(f"only_my_input={args.only_my_input}")
+    if args.input is not None:
+        # 'auto' clears the pin and lets the daemon learn it from the TV again.
+        value = "" if args.input.strip().lower() in ("auto", "") else \
+            args.input.strip().lower()
+        cfg.device.input_id = value
+        changed.append(f"input={value or 'auto'}")
     cfg.save()
     _print("Updated: " + (", ".join(changed) if changed else "(nothing)"))
     if changed and _signal_running_daemon():
@@ -175,6 +184,13 @@ def cmd_status(args) -> int:
            "(power the TV off when the PC shuts down)")
     _print(f"  PC sleep    : {'ON' if cfg.screen_off_on_pc_sleep else 'OFF'} "
            "(screen follows the PC into sleep and back)")
+    if cfg.only_my_input:
+        where = cfg.device.input_id or "(learning - not seen yet)"
+        _print(f"  This PC's in: {where}  (the TV is left alone whenever it's "
+               "showing another source)")
+    else:
+        _print("  This PC's in: (not checked - Easy Mode acts whatever the TV "
+               "is showing)")
     _print(f"  Idle backend: {idle_mod.idle_backend_name()} "
            f"(real={idle_mod.is_real_backend()})")
     if not idle_mod.is_real_backend():
@@ -215,6 +231,19 @@ def cmd_test(args) -> int:
         return 0 if res.ok else 1
     try:
         _print(f"Connected to {cfg.device.name} at {cfg.device.ip}.")
+        # Report which source the TV says it's showing. This is what stops a
+        # second computer on the same TV from blanking the one you're watching,
+        # so it's worth confirming the panel actually answers.
+        showing = ""
+        try:
+            showing = client.get_foreground_input()
+        except Exception as exc:  # noqa: BLE001
+            _print(f"(Could not ask the TV what it's showing: {exc})")
+        if showing:
+            _print(f"TV is currently showing: {showing}")
+        else:
+            _print("This TV won't say which input it's showing, so Easy Mode "
+                   "can't tell when another computer is on screen.")
         _print("Turning screen OFF for 3 seconds...")
         client.screen_off()
         time.sleep(3)
@@ -284,12 +313,32 @@ def cmd_repair(args) -> int:
     return 0 if res.ok else 1
 
 
+def _tv_shows_this_pc(cfg, client) -> bool:
+    """Whether the TV is currently displaying this PC (see Daemon._may_darken).
+
+    Fails open whenever the answer isn't known, so a single-PC setup is
+    unaffected.
+    """
+    if not cfg.only_my_input or not cfg.device.input_id:
+        return True
+    try:
+        seen = client.get_foreground_input()
+    except Exception:  # noqa: BLE001 - unknown is a valid answer
+        return True
+    return not seen or seen == cfg.device.input_id
+
+
 def _tv_power_off(cfg, log=lambda m: None, timeout: float = 8.0,
-                  recover: bool = False) -> bool:
+                  recover: bool = False, guard: bool = False) -> str:
     """Connect and fully power the TV off (used by `off` and shutdown hooks).
 
     ``recover`` re-locates the TV by MAC if the saved IP is stale; it's left off
     for the shutdown hook, which must stay fast while the PC is powering down.
+    ``guard`` leaves the TV alone when it is showing another computer - set on
+    the shutdown paths, where this PC going down says nothing about the machine
+    currently on screen, but not when the user explicitly asked for `off`.
+
+    Returns 'off', 'skipped' (another source is on screen) or 'failed'.
     """
     from .recovery import connect_tv
     try:
@@ -297,13 +346,16 @@ def _tv_power_off(cfg, log=lambda m: None, timeout: float = 8.0,
                             recover=recover, log=log)
     except Exception as exc:  # noqa: BLE001
         log(f"power off failed: {exc}")
-        return False
+        return "failed"
     try:
+        if guard and not _tv_shows_this_pc(cfg, client):
+            log("Leaving the TV on: it is showing another source, not this PC.")
+            return "skipped"
         client.power_off()
-        return True
+        return "off"
     except Exception as exc:  # noqa: BLE001
         log(f"power off failed: {exc}")
-        return False
+        return "failed"
     finally:
         client.close()
 
@@ -317,9 +369,14 @@ def cmd_off(args) -> int:
     if not cfg.device.ip and not cfg.device.mac:
         _print("No TV configured.")
         return 1
-    ok = _tv_power_off(cfg, log=_print, recover=True)
-    _print("TV powered off." if ok else "Could not power off the TV.")
-    return 0 if ok else 1
+    # A user typing `lgtv-easy off` means it; only the shutdown hook
+    # (--only-if-configured) defers to whatever is on screen.
+    result = _tv_power_off(cfg, log=_print, recover=True,
+                           guard=getattr(args, "only_if_configured", False))
+    if result == "skipped":
+        return 0
+    _print("TV powered off." if result == "off" else "Could not power off the TV.")
+    return 0 if result == "off" else 1
 
 
 def cmd_on(args) -> int:
@@ -408,7 +465,7 @@ def _install_shutdown_hooks(cfg, daemon, logger) -> None:
             return
         if cfg.tv_off_on_shutdown:
             logger.info("Shutting down: powering the TV off.")
-            _tv_power_off(cfg, log=logger.info, timeout=5.0)
+            _tv_power_off(cfg, log=logger.info, timeout=5.0, guard=True)
 
     def on_term(_signum=None, _frame=None):
         if state["terminating"]:  # a second SIGTERM arrived mid-power-off
@@ -549,6 +606,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--sleep-with-pc", dest="sleep_with_pc", type=_boolish,
                    help="screen off when the PC sleeps, back on at resume (true/false)")
     s.add_argument("--mac", help="set Wake-on-LAN MAC address")
+    s.add_argument("--only-my-input", dest="only_my_input", type=_boolish,
+                   help="only touch the TV while it is showing this PC, so a "
+                        "second computer on the same TV can't blank it (true/false)")
+    s.add_argument("--input", help="which TV input this PC is on, e.g. hdmi2. "
+                                   "Use 'auto' to let it be learned from the TV.")
     s.set_defaults(func=cmd_set)
 
     s = sub.add_parser("status", help="show current settings")
