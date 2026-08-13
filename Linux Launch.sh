@@ -46,6 +46,11 @@ NO_UPDATE="${LGTV_EASY_NO_UPDATE:-0}"
 # lives at the repo root.
 SUBDIR="EasyMode"
 LAUNCHER_NAME="Linux Launch.sh"
+# The GUI returns this when the user pressed "Kill process": the stop was
+# deliberate, so do NOT start the supervisor once the window closes. Without
+# honouring it, closing the window would silently restart everything the button
+# just stopped. Must match EXIT_SERVICE_STOPPED in lgtv_easy/gui.py.
+EXIT_SERVICE_STOPPED=10
 
 mkdir -p "$STATE_DIR"
 
@@ -458,6 +463,12 @@ main() {
       if needs_setup; then
         log "First run: opening the setup window before backgrounding."
         run_cli gui
+        local rc=$?
+        if [ "$rc" = "$EXIT_SERVICE_STOPPED" ]; then
+          say "  ${C_WARN}[!]${C_RESET}  Easy Mode was stopped from the window."
+          say "       ${C_DIM}Restart the app to resume service.${C_RESET}"
+          exit 0
+        fi
         if needs_setup; then
           log "Setup not completed; not backgrounding."
           pause_before_exit
@@ -476,7 +487,14 @@ main() {
       # on first run, settings panel afterwards; text wizard if there's no
       # display), then run the watcher in the foreground.
       log "Opening the control panel window."
-      if ! run_cli gui || needs_setup; then
+      run_cli gui
+      local rc=$?
+      if [ "$rc" = "$EXIT_SERVICE_STOPPED" ]; then
+        say "  ${C_WARN}[!]${C_RESET}  Easy Mode was stopped from the window."
+        say "       ${C_DIM}Restart the app to resume service.${C_RESET}"
+        exit 0
+      fi
+      if [ "$rc" != "0" ] || needs_setup; then
         log "Setup not completed."
         pause_before_exit
         exit 1

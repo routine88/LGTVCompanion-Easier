@@ -46,6 +46,11 @@ $NoUpdate = ($env:LGTV_EASY_NO_UPDATE -eq "1")
 # the cloned repo; the .bat shim at the repo root points into here.
 $SubDir = "EasyMode"
 $LauncherName = "LGTV-Easy-Mode-WINDOWS.ps1"
+# The GUI returns this when the user pressed "Kill process": the stop was
+# deliberate, so do NOT start the supervisor once the window closes. Without
+# honouring it, closing the window would silently restart everything the button
+# just stopped. Must match EXIT_SERVICE_STOPPED in lgtv_easy/gui.py.
+$ExitServiceStopped = 10
 
 $LogFile = Join-Path $StateDir "launcher.log"
 $PidFile = Join-Path $StateDir "launcher.pid"
@@ -387,9 +392,26 @@ function Maybe-SelfUpdate {
 }
 
 function App-Dir { Join-Path $AppHome $SubDir }
+
+# The CLI's exit code from the last Run-Cli, kept in a script variable rather
+# than returned: Run-Cli's output IS the app's console output, so returning the
+# code would print a stray number in the middle of it.
+$script:LastCliExit = 0
 function Run-Cli([string[]]$cliArgs) {
     Push-Location (App-Dir)
-    try { & python -m lgtv_easy @cliArgs } finally { Pop-Location }
+    try {
+        & python -m lgtv_easy @cliArgs
+        $script:LastCliExit = $LASTEXITCODE
+    } finally { Pop-Location }
+}
+
+# The GUI's "Kill process" button stopped everything on purpose. Say so and let
+# the launcher exit quietly, instead of starting a fresh watcher on the way out.
+function Exit-IfServiceStopped {
+    if ($script:LastCliExit -ne $ExitServiceStopped) { return }
+    Say "  [!]  Easy Mode was stopped from the window." "Yellow"
+    Say "       Restart the app to resume service." "DarkGray"
+    exit 0
 }
 
 function Needs-Setup {
@@ -539,6 +561,7 @@ if ($env:LGTV_EASY_HANDOFF -eq "1") {
 if ($Setup) {
     Log "Opening the setup window (forced)."
     Run-Cli @("gui")
+    Exit-IfServiceStopped
     if (Needs-Setup) { Pause-BeforeExit; exit 1 }
     exit 0
 }
@@ -551,6 +574,7 @@ if ($Background) {
     # there's no display), then make sure the background watcher is running.
     Log "Opening the control panel window."
     Run-Cli @("gui")
+    Exit-IfServiceStopped
     if (Needs-Setup) { Log "Setup not completed."; Pause-BeforeExit; exit 1 }
 
     $running = Get-LivePid $PidFile "powershell*"
@@ -604,6 +628,7 @@ if ($Background) {
 if (Needs-Setup) {
     Log "First run: opening the setup window."
     Run-Cli @("gui")
+    Exit-IfServiceStopped
     if (Needs-Setup) { Log "Setup not completed."; Pause-BeforeExit; exit 1 }
 }
 Start-Supervisor

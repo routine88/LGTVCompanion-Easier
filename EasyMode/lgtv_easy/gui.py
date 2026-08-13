@@ -40,6 +40,12 @@ PAD = 14
 # background watcher has learned (e.g. which input this PC is on).
 INPUT_POLL_MS = 2000
 
+# Exit code meaning "the user stopped the service on purpose - do not start a
+# watcher after this window closes". The launchers run their supervisor once the
+# GUI returns, so without this contract the "kill process" button would be
+# undone the moment the window was closed.
+EXIT_SERVICE_STOPPED = 10
+
 # Flat dark palette. Kept in one place so every widget pulls the same colours.
 PALETTE = {
     "bg":        "#15171C",   # window background
@@ -140,6 +146,13 @@ def _apply_theme(root: tk.Misc) -> dict:
     style.map("Accent.TButton",
               background=[("active", P["accent_hi"]), ("pressed", P["accent_lo"])],
               foreground=[("disabled", "#FFFFFF")])
+    # A destructive action that still lives in a footer: red enough to read as
+    # "this stops things", flat enough not to shout over the primary buttons.
+    style.configure("DangerGhost.TButton", background=P["bg"], foreground=P["danger"],
+                    bordercolor=P["bg"], lightcolor=P["bg"], darkcolor=P["bg"],
+                    borderwidth=0, relief="flat", padding=(12, 9), font=(ui, 10))
+    style.map("DangerGhost.TButton", background=[("active", P["danger_bg"])],
+              foreground=[("disabled", P["muted"])])
     style.configure("Ghost.TButton", background=P["bg"], foreground=P["muted"],
                     bordercolor=P["bg"], lightcolor=P["bg"], darkcolor=P["bg"],
                     borderwidth=0, relief="flat", padding=(12, 9), font=(ui, 10))
@@ -426,6 +439,11 @@ class App(tk.Tk):
         self.cfg = Config.load()
         self.daemon: Optional[Daemon] = None
         self._lock = None  # singleton guard held while WE run the watcher
+        # Latched by the "kill process" button. Once set, nothing in this window
+        # may start a watcher again - not applying a setting, not closing the
+        # window - until the app is restarted. A "stop" that something quietly
+        # undoes a moment later is worse than no stop button at all.
+        self.service_stopped = False
         # Thread -> UI message pump so worker threads never touch widgets.
         self._events: "queue.Queue" = queue.Queue()
         self._pump_id = self.after(100, self._pump)
@@ -533,6 +551,8 @@ class App(tk.Tk):
         already held, we leave the running watcher alone and just act as a
         settings panel; the status line says so.
         """
+        if self.service_stopped:
+            return  # deliberately killed; only restarting the app resumes it
         if self.daemon:
             # We own the watcher in-process: the daemon already shares this very
             # config object, so the edit is visible; nudge it to apply now.
@@ -569,6 +589,42 @@ class App(tk.Tk):
             return
         from .singleton import SingleInstance
         SingleInstance("daemon").signal(sig)
+
+    def stop_service(self) -> str:
+        """Stop the watcher outright and keep it stopped. Returns what happened.
+
+        Three things can be driving the TV, and stopping only some of them looks
+        exactly like the button not working:
+
+        1. a daemon running inside THIS window,
+        2. a separate daemon process (the login auto-start, or a supervised one),
+        3. the launcher's supervisor - which restarts its daemon five seconds
+           after it dies, so killing the daemon while leaving this alive would
+           undo itself before the user finished reading the message.
+
+        The supervisor goes first for exactly that reason; its own handler takes
+        its daemon child down with it. Nothing here uses SIGTERM - see
+        SingleInstance.stop_holder - so the TV is left exactly as it is.
+        """
+        from .singleton import SingleInstance
+        self.service_stopped = True  # latch first: nothing may re-arm behind us
+        stopped = []
+        if self.daemon:
+            self.daemon.stop()
+            self.daemon = None
+            stopped.append("this window's watcher")
+        if self._lock:
+            self._lock.release()
+            self._lock = None
+        supervisor = SingleInstance("launcher").stop_holder()
+        if supervisor:
+            stopped.append(f"supervisor pid {supervisor}")
+        watcher = SingleInstance("daemon").stop_holder()
+        if watcher:
+            stopped.append(f"watcher pid {watcher}")
+        if not stopped:
+            return "Nothing was running."
+        return "Stopped " + ", ".join(stopped) + "."
 
     def on_close(self):
         if self.daemon:
@@ -843,6 +899,10 @@ class SettingsPanel(ttk.Frame):
         ttk.Button(nav, text="Re-run setup", style="Ghost.TButton",
                    command=self.app.show_wizard).pack(side="left", padx=6)
         ttk.Label(nav, text=f"v{__version__}", style="Sub.TLabel").pack(side="right")
+        self._kill_btn = ttk.Button(nav, text="Kill process",
+                                    style="DangerGhost.TButton",
+                                    command=self._kill_service)
+        self._kill_btn.pack(side="right", padx=6)
 
         statusrow = ttk.Frame(self)
         statusrow.pack(side="bottom", fill="x", pady=(PAD - 4, 0))
@@ -1044,8 +1104,33 @@ class SettingsPanel(ttk.Frame):
         autostart_mod.set_enabled(self.autostart.get())
         self._refresh_status()
 
+    def _kill_service(self):
+        """Stop the watcher for good. No confirmation dialog: this is trivially
+        reversible (restart the app) and the message says exactly how."""
+        self._killed_detail = self.app.stop_service()
+        try:
+            self._kill_btn.state(["disabled"])
+        except tk.TclError:
+            pass
+        from .applog import get_logger
+        get_logger().info("Service stopped from the settings window: %s",
+                          self._killed_detail)
+        self._refresh_status()
+
     def _refresh_status(self):
         cfg = self.app.cfg
+        # A stopped service outranks every other status: nothing below is true
+        # any more, and the one thing the user needs is how to get it back.
+        if self.app.service_stopped:
+            if self._status_dot is not None:
+                colour = THEME["danger"]
+                self._status_dot.delete("all")
+                self._status_dot.create_oval(1, 1, 9, 9, fill=colour, outline=colour)
+            detail = getattr(self, "_killed_detail", "")
+            self.status.config(
+                text=(f"{detail} " if detail else "")
+                     + "Restart the app to resume service.")
+            return
         backend = idle_mod.idle_backend_name()
         warn = "" if idle_mod.is_real_backend() else \
             "  (warning: OS idle detection unavailable here)"
@@ -1298,7 +1383,9 @@ def main() -> int:
     app = App()
     app.protocol("WM_DELETE_WINDOW", app.on_close)
     app.mainloop()
-    return 0
+    # Tell the launcher the stop was deliberate, so it does not start its
+    # supervisor the moment this window closes and undo the whole thing.
+    return EXIT_SERVICE_STOPPED if app.service_stopped else 0
 
 
 if __name__ == "__main__":

@@ -36,9 +36,23 @@ def _alive(pid: int) -> bool:
                 return True
             return False
         os.kill(pid, 0)
-        return True
     except (OSError, ValueError):
         return False
+    # A dead-but-unreaped process still answers signal 0, so os.kill alone
+    # reports a zombie as a live lock holder. That matters twice over: a zombie
+    # daemon would block a new one from ever acquiring the lock, and stop_holder
+    # would refuse to clear the pidfile of something it had just killed. Linux
+    # exposes the real state; elsewhere we fall through to the old assumption.
+    try:
+        with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as fh:
+            # The comm field can contain spaces and parentheses, so the state
+            # letter is the first field AFTER the final ')'.
+            fields = fh.read().rpartition(")")[2].split()
+        if fields and fields[0] == "Z":
+            return False
+    except OSError:
+        pass
+    return True
 
 
 class SingleInstance:
@@ -74,6 +88,51 @@ class SingleInstance:
             return True
         except OSError:
             return False
+
+    def stop_holder(self, timeout: float = 5.0) -> Optional[int]:
+        """Stop whatever process holds this lock. Returns the pid, or None.
+
+        Used by the GUI's "kill process" button, which has to stop both the
+        watcher and the supervisor that would otherwise restart it five seconds
+        later.
+
+        **Never SIGTERM.** To the daemon, SIGTERM means "the machine is shutting
+        down" and its handler powers the TV OFF - the exact opposite of what
+        stopping the watcher should do. SIGUSR1 is its "stand down and leave the
+        TV alone" signal. Windows has neither: there ``os.kill`` is
+        TerminateProcess, which runs no handler at all, so the TV is untouched
+        for the same reason.
+
+        Escalates to SIGKILL if the process ignores the polite signal - also
+        uncatchable, so also safe for the TV.
+        """
+        import signal as _signal
+        pid = self._holder()
+        if not pid or pid == os.getpid():
+            return None
+        polite = getattr(_signal, "SIGUSR1", None) or _signal.SIGTERM
+        try:
+            os.kill(pid, polite)
+        except OSError:
+            return None
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not _alive(pid):
+                break
+            time.sleep(0.1)
+        if _alive(pid):
+            try:
+                os.kill(pid, getattr(_signal, "SIGKILL", _signal.SIGTERM))
+            except OSError:
+                pass
+        # A killed process never runs its own cleanup, so the pidfile it left
+        # behind would masquerade as a live lock. Clear it once it's really gone.
+        if not _alive(pid):
+            try:
+                os.remove(self.path)
+            except OSError:
+                pass
+        return pid
 
     def _write(self) -> None:
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
