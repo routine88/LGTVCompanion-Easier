@@ -616,10 +616,14 @@ class App(tk.Tk):
         if self._lock:
             self._lock.release()
             self._lock = None
-        supervisor = SingleInstance("launcher").stop_holder()
+        # The name checks matter most on Windows, which recycles pids freely: a
+        # pidfile left by a killed supervisor keeps a number that some innocent
+        # program may since have inherited.
+        supervisor = SingleInstance("launcher").stop_holder(
+            expect=("powershell", "pwsh", "bash"))
         if supervisor:
             stopped.append(f"supervisor pid {supervisor}")
-        watcher = SingleInstance("daemon").stop_holder()
+        watcher = SingleInstance("daemon").stop_holder(expect=("python",))
         if watcher:
             stopped.append(f"watcher pid {watcher}")
         if not stopped:

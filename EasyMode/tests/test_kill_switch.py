@@ -139,6 +139,49 @@ def test_stop_holder_never_uses_sigterm():
         "SIGTERM should appear only as the two Windows fallbacks")
 
 
+def test_stop_holder_refuses_a_pid_that_is_not_ours(tmp_path, monkeypatch):
+    """A pidfile left behind by a killed process keeps its number, and numbers
+    get reused - Windows especially. Without an identity check the stop button
+    would terminate whichever stranger's process inherited the pid."""
+    monkeypatch.setenv("LGTV_EASY_HOME", str(tmp_path))
+    import subprocess
+    # Something that is emphatically not our watcher.
+    victim = subprocess.Popen(["sleep", "30"])
+    try:
+        lock = SingleInstance("daemon")
+        with open(lock.path, "w", encoding="utf-8") as fh:
+            fh.write(str(victim.pid))
+
+        assert lock.stop_holder(timeout=1.0, expect=("python",)) is None
+        assert victim.poll() is None, "killed an unrelated process"
+    finally:
+        victim.kill()
+        victim.wait(timeout=5)
+
+
+def test_stop_holder_accepts_a_pid_that_is_ours(tmp_path, monkeypatch):
+    """The guard must not be so strict it stops the button working."""
+    monkeypatch.setenv("LGTV_EASY_HOME", str(tmp_path))
+    import subprocess
+    import sys
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    lock = SingleInstance("daemon")
+    with open(lock.path, "w", encoding="utf-8") as fh:
+        fh.write(str(child.pid))
+
+    assert lock.stop_holder(timeout=3.0, expect=("python",)) == child.pid
+    child.wait(timeout=5)
+
+
+def test_process_name_is_reported_without_extension():
+    from lgtv_easy.singleton import _process_name
+    name = _process_name(os.getpid())
+    if not name:
+        pytest.skip("process names unavailable on this platform")
+    assert name.startswith("python"), name
+    assert not name.endswith(".exe")
+
+
 def test_stop_holder_is_a_no_op_with_nobody_holding(tmp_path, monkeypatch):
     monkeypatch.setenv("LGTV_EASY_HOME", str(tmp_path))
     assert SingleInstance("daemon").stop_holder() is None

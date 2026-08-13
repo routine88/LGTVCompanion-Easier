@@ -55,6 +55,49 @@ def _alive(pid: int) -> bool:
     return True
 
 
+def _process_name(pid: int) -> str:
+    """Executable name of a live pid, lowercased and without any extension.
+
+    Returns '' when it cannot be told, which callers must read as "no opinion"
+    rather than "not ours" - refusing to act on an unknown name would break the
+    stop button on any platform we can't inspect.
+
+    This exists so a pidfile is proved to point at OUR process before anything
+    is killed. Windows recycles pids aggressively, so a stale file whose number
+    now belongs to some unrelated program would otherwise get that program
+    terminated; the PowerShell launcher has always matched on the name for
+    exactly this reason (see Get-LivePid).
+    """
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return ""
+            try:
+                size = wintypes.DWORD(32768)
+                buf = ctypes.create_unicode_buffer(size.value)
+                ok = kernel32.QueryFullProcessImageNameW(
+                    handle, 0, buf, ctypes.byref(size))
+                if not ok:
+                    return ""
+                name = os.path.basename(buf.value)
+            finally:
+                kernel32.CloseHandle(handle)
+        else:
+            with open(f"/proc/{pid}/comm", "r", encoding="utf-8") as fh:
+                name = fh.read().strip()
+    except Exception:  # noqa: BLE001 - identity is best-effort, never fatal
+        return ""
+    name = name.lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
 class SingleInstance:
     def __init__(self, name: str = "daemon"):
         self.path = os.path.join(config_dir(), f"{name}.pid")
@@ -89,8 +132,16 @@ class SingleInstance:
         except OSError:
             return False
 
-    def stop_holder(self, timeout: float = 5.0) -> Optional[int]:
+    def stop_holder(self, timeout: float = 5.0,
+                    expect: tuple = ()) -> Optional[int]:
         """Stop whatever process holds this lock. Returns the pid, or None.
+
+        ``expect`` is a tuple of executable-name prefixes the holder must match
+        (e.g. ``("python",)``). A pidfile left behind by a killed process keeps
+        its number, and that number gets reused - so without this check the stop
+        button could terminate a stranger's process that merely inherited the
+        pid. Refuses rather than guesses when the name is known and wrong;
+        proceeds when it cannot be determined at all.
 
         Used by the GUI's "kill process" button, which has to stop both the
         watcher and the supervisor that would otherwise restart it five seconds
@@ -110,6 +161,12 @@ class SingleInstance:
         pid = self._holder()
         if not pid or pid == os.getpid():
             return None
+        if expect:
+            name = _process_name(pid)
+            if name and not any(name.startswith(e) for e in expect):
+                # Stale pidfile, number since recycled. Killing here would take
+                # out a program that has nothing to do with us.
+                return None
         polite = getattr(_signal, "SIGUSR1", None) or _signal.SIGTERM
         try:
             os.kill(pid, polite)
