@@ -4,11 +4,18 @@
 # -----------------------------------------------------------------------------
 # This is the ONE file Linux users run. It:
 #   1. Installs dependencies (git, python3, tkinter for the GUI).
-#   2. Clones or updates the app from GitHub's default branch - INCLUDING
-#      updates to this very launcher (it re-executes itself if it changed).
+#   2. Updates the app from GitHub's default branch - INCLUDING updates to this
+#      very launcher (it re-executes itself if it changed) - and REPORTS what
+#      happened: updated (with what arrived), already current, or couldn't
+#      reach GitHub. An update that silently does nothing is the failure this
+#      reporting exists to make impossible.
 #   3. Opens the graphical setup window on first use (text wizard if headless).
-#   4. Supervises the idle daemon in the background, restarting it if it crashes
-#      and periodically pulling updates. All errors go to a persistent log.
+#   4. Supervises the idle daemon in the background, restarting it if it crashes.
+#      All errors go to a persistent log.
+#
+# Updates are applied WHEN YOU RUN THIS LAUNCHER, and at no other time. There is
+# deliberately no periodic background check: a watcher that rewrites its own code
+# and restarts itself midway through an evening is a surprise, not a feature.
 #
 # Usage:
 #   ./"Linux Launch.sh"              # set up (if needed), run in foreground
@@ -28,9 +35,12 @@ APP_HOME="${LGTV_EASY_APP_HOME:-$HOME/.local/share/lgtv-companion-easy}"
 STATE_DIR="${LGTV_EASY_HOME:-$HOME/.config/lgtv-companion-easy}"
 LOG_FILE="$STATE_DIR/launcher.log"
 PID_FILE="$STATE_DIR/launcher.pid"
-UPDATE_EVERY_SECONDS="${LGTV_EASY_UPDATE_INTERVAL:-3600}"
-# Set LGTV_EASY_NO_UPDATE=1 to freeze the code: no git fetch/clone, no
-# self-update, no periodic pulls. Run only the code already on disk.
+# The single-instance lock the idle daemon takes (lgtv_easy/singleton.py). We
+# need it by name to retire a stale daemon after an update - see
+# retire_stale_daemon, which is the whole reason updates used to not take.
+DAEMON_PID_FILE="$STATE_DIR/daemon.pid"
+# Set LGTV_EASY_NO_UPDATE=1 to freeze the code: no git fetch/clone and no
+# self-update. Run only the code already on disk.
 NO_UPDATE="${LGTV_EASY_NO_UPDATE:-0}"
 # The Python app lives in the EasyMode/ subdirectory of the repo; this launcher
 # lives at the repo root.
@@ -39,14 +49,54 @@ LAUNCHER_NAME="Linux Launch.sh"
 
 mkdir -p "$STATE_DIR"
 
+# ---- console presentation ---------------------------------------------------
+# Defined before log(), which uses these: `set -u` is on, so an unset colour
+# variable would abort the script rather than merely print plainly.
+#
+# Two audiences, two functions. log() keeps the timestamped engineering record;
+# say() talks to the person watching the window. Everything say()s is recorded
+# too (with the colour stripped), so a pasted log tells the same story the
+# window did - the usual support trap is a screen that said something the log
+# did not.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
+  C_OK=$'\033[32m'; C_WARN=$'\033[33m'; C_ERR=$'\033[31m'; C_ACC=$'\033[36m'
+else
+  C_RESET=""; C_DIM=""; C_BOLD=""; C_OK=""; C_WARN=""; C_ERR=""; C_ACC=""
+fi
+RULE="======================================================================"
+
 log() {
   local line; line="$(date '+%Y-%m-%d %H:%M:%S') [launcher] $*"
   printf '%s\n' "$line" >>"$LOG_FILE"
   # Echo to the terminal too, but only when one is attached. In the detached
   # background supervisor stderr is already redirected to the log file, so
   # writing there as well would duplicate every line.
-  [ -t 2 ] && printf '%s\n' "$line" >&2
+  #
+  # On a terminal the timestamp and [launcher] tag are dropped and the line is
+  # dimmed: they are what a log needs and exactly what a person reading a window
+  # does not. Nothing is lost - the file above keeps the full form - and the
+  # progress the user actually cares about (say/report_update) stays legible
+  # instead of being buried in machine prefixes.
+  [ -t 2 ] && printf '%s\n' "  ${C_DIM}$*${C_RESET}" >&2
   return 0
+}
+
+say() {
+  local msg="$*"
+  # Only to the terminal: the detached supervisor has stdout pointed at the log
+  # already, so printing there too would double every line.
+  [ -t 1 ] && printf '%s\n' "$msg"
+  printf '%s [ui] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" \
+    "$(printf '%s' "$msg" | sed $'s/\033\\[[0-9;]*m//g')" >>"$LOG_FILE"
+  return 0
+}
+
+banner() {
+  say ""
+  say "${C_ACC}${RULE}${C_RESET}"
+  say "  ${C_BOLD}LGTV Companion Easy Mode${C_RESET}"
+  say "${C_ACC}${RULE}${C_RESET}"
 }
 
 # Keep the terminal open after a failure so the user can read and report the
@@ -100,19 +150,113 @@ install_deps() {
 }
 
 # ---- repository / self-update ----------------------------------------------
+# Outcome of the last sync_repo, so the caller can both REPORT it and decide
+# whether anything actually needs restarting. Previously the caller could only
+# tell "git didn't error", which is not the same question at all - it restarted
+# the daemon on every check whether or not a single byte had changed.
+#   SYNC_RESULT : cloned | updated | current | offline | failed
+SYNC_RESULT=""
+SYNC_OLD=""       # commit before
+SYNC_NEW=""       # commit after
+SYNC_COUNT=0      # how many commits arrived
+SYNC_SUBJECTS=""  # their subject lines, newest first
+
+repo_head() { git -C "$APP_HOME" rev-parse --short HEAD 2>/dev/null || echo ""; }
+repo_age()  { git -C "$APP_HOME" log -1 --format='%cr' 2>/dev/null || echo "unknown age"; }
+
 sync_repo() {
+  SYNC_RESULT=""; SYNC_OLD=""; SYNC_NEW=""; SYNC_COUNT=0; SYNC_SUBJECTS=""
   if [ ! -d "$APP_HOME/.git" ]; then
     log "Cloning $REPO_URL into $APP_HOME"
-    git clone --branch "$REPO_BRANCH" "$REPO_URL" "$APP_HOME" >>"$LOG_FILE" 2>&1 \
-      || { log "ERROR: clone failed"; return 1; }
-  else
-    log "Updating from GitHub ($REPO_BRANCH)"
-    git -C "$APP_HOME" fetch --quiet origin "$REPO_BRANCH" >>"$LOG_FILE" 2>&1 \
-      || { log "WARNING: fetch failed (offline?), using local copy"; return 0; }
-    git -C "$APP_HOME" checkout --quiet "$REPO_BRANCH" >>"$LOG_FILE" 2>&1 || true
-    git -C "$APP_HOME" reset --hard "origin/$REPO_BRANCH" >>"$LOG_FILE" 2>&1 \
-      || log "WARNING: could not fast-forward"
+    if git clone --branch "$REPO_BRANCH" "$REPO_URL" "$APP_HOME" >>"$LOG_FILE" 2>&1; then
+      SYNC_RESULT="cloned"; SYNC_NEW="$(repo_head)"; return 0
+    fi
+    SYNC_RESULT="failed"; log "ERROR: clone failed"; return 1
   fi
+  SYNC_OLD="$(repo_head)"
+  log "Checking GitHub for updates ($REPO_BRANCH)"
+  if ! git -C "$APP_HOME" fetch --quiet origin "$REPO_BRANCH" >>"$LOG_FILE" 2>&1; then
+    SYNC_RESULT="offline"; SYNC_NEW="$SYNC_OLD"
+    log "Fetch failed (offline?); keeping the copy on disk."
+    return 0
+  fi
+  git -C "$APP_HOME" checkout --quiet "$REPO_BRANCH" >>"$LOG_FILE" 2>&1 || true
+  if ! git -C "$APP_HOME" reset --hard "origin/$REPO_BRANCH" >>"$LOG_FILE" 2>&1; then
+    SYNC_RESULT="failed"; SYNC_NEW="$SYNC_OLD"
+    log "ERROR: could not apply the update."
+    return 1
+  fi
+  SYNC_NEW="$(repo_head)"
+  if [ "$SYNC_NEW" = "$SYNC_OLD" ]; then
+    SYNC_RESULT="current"
+  else
+    SYNC_RESULT="updated"
+    # A force-push can leave the old commit unreachable, so both of these are
+    # best-effort decoration - never let them fail the update.
+    SYNC_COUNT="$(git -C "$APP_HOME" rev-list --count "$SYNC_OLD..$SYNC_NEW" 2>/dev/null || echo 0)"
+    SYNC_SUBJECTS="$(git -C "$APP_HOME" log --format='%s' "$SYNC_OLD..$SYNC_NEW" 2>/dev/null | head -6)"
+  fi
+  return 0
+}
+
+# True only when new code actually arrived - the trigger for restarting anything.
+sync_changed() { [ "$SYNC_RESULT" = "updated" ] || [ "$SYNC_RESULT" = "cloned" ]; }
+
+# Say plainly whether the update worked. "It launched" and "it updated" are
+# different claims, and only one of them used to be visible.
+report_update() {
+  case "$SYNC_RESULT" in
+    cloned)
+      say "  ${C_OK}[ok]${C_RESET} Installed from GitHub ${C_DIM}(${SYNC_NEW})${C_RESET}"
+      ;;
+    updated)
+      say "  ${C_OK}[ok]${C_RESET} Updated ${C_DIM}${SYNC_OLD}${C_RESET} ${C_BOLD}->${C_RESET} ${C_ACC}${SYNC_NEW}${C_RESET}  ${C_DIM}(${SYNC_COUNT} new)${C_RESET}"
+      printf '%s\n' "$SYNC_SUBJECTS" | while IFS= read -r subject; do
+        [ -n "$subject" ] && say "         ${C_DIM}- ${subject}${C_RESET}"
+      done
+      ;;
+    current)
+      say "  ${C_OK}[ok]${C_RESET} Already up to date ${C_DIM}(${SYNC_NEW}, $(repo_age))${C_RESET}"
+      ;;
+    offline)
+      say "  ${C_WARN}[!]${C_RESET}  Could not reach GitHub - update SKIPPED."
+      say "       ${C_DIM}Running the copy already on disk (${SYNC_NEW}, $(repo_age)).${C_RESET}"
+      ;;
+    failed)
+      say "  ${C_ERR}[X]${C_RESET}  Update FAILED - see $LOG_FILE"
+      say "       ${C_DIM}Running the copy already on disk ($(repo_head)).${C_RESET}"
+      ;;
+    *)
+      say "  ${C_DIM}[-]  Update check skipped.${C_RESET}"
+      ;;
+  esac
+}
+
+# Retire whatever daemon holds the single-instance lock, so newly-pulled code is
+# actually loaded.
+#
+# THE trap this exists for: Python reads its source once, at process start. A
+# daemon started at LOGIN (the autostart entry) holds the lock for the whole
+# session, so after an update the supervisor's own child just queues behind it
+# forever and the app stays pinned to old code with nothing on screen to say so.
+# Restarting our own child is not enough, because the holder is often not our
+# child. Both machines hit this; on Windows it looked like an update that simply
+# never took.
+#
+# SIGUSR1, never SIGTERM: the daemon's TERM handler powers the TV off.
+retire_stale_daemon() {
+  local holder
+  holder="$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo)"
+  case "$holder" in ''|*[!0-9]*) return 0 ;; esac
+  kill -0 "$holder" 2>/dev/null || return 0
+  log "Retiring daemon pid $holder so the new code is loaded."
+  kill -USR1 "$holder" 2>/dev/null || return 0
+  local _i
+  for _i in $(seq 1 20); do
+    kill -0 "$holder" 2>/dev/null || { log "Daemon pid $holder stood down."; return 0; }
+    sleep 0.25
+  done
+  log "WARNING: daemon pid $holder did not stand down; it may still run old code."
   return 0
 }
 
@@ -203,7 +347,6 @@ supervise() {
   # If another watcher (e.g. the login auto-start) already holds the lock, our
   # daemon child should wait for it rather than spin-restart.
   export LGTV_EASY_WAIT_LOCK=1
-  local last_update; last_update=$(date +%s)
 
   while true; do
     log "Starting idle daemon."
@@ -211,41 +354,16 @@ supervise() {
     ( cd "$(APP_DIR)" && exec python3 -m lgtv_easy run ) >>"$LOG_FILE" 2>&1 &
     daemon_pid=$!
 
-    # Watch the daemon while periodically checking for updates.
+    # Watch the daemon. There is deliberately no update check in here: updates
+    # are applied when the user runs the launcher, so a watcher never rewrites
+    # its own code and restarts itself out from under someone mid-evening. (The
+    # old hourly check also restarted the daemon on EVERY pass, whether or not
+    # anything had actually changed.)
     while kill -0 "$daemon_pid" 2>/dev/null; do
       # Interruptible sleep: backgrounding sleep and waiting on it lets a stop
-      # signal take effect immediately, instead of after the full poll interval
+      # signal take effect immediately, instead of after the full interval
       # (bash defers traps until the current foreground command returns).
       sleep 15 & wait $! 2>/dev/null
-      local now; now=$(date +%s)
-      if [ "$NO_UPDATE" != "1" ] && [ $(( now - last_update )) -ge "$UPDATE_EVERY_SECONDS" ]; then
-        last_update=$now
-        log "Periodic update check."
-        if sync_repo; then
-          if launcher_changed; then
-            # The launcher rewrote itself. Re-exec the new version, but resume as
-            # a pure --supervise: re-execing with our original args would replay
-            # the GUI-opening default case (popping a window and stacking another
-            # supervisor). Stop our daemon child first and drop the pidfile so it
-            # isn't orphaned behind the exec; the fresh supervisor restarts it.
-            log "Launcher updated itself; re-executing as the background watcher."
-            kill -USR1 "$daemon_pid" 2>/dev/null
-            rm -f "$PID_FILE"
-            export LGTV_EASY_HANDOFF=1
-            local repo_launcher; repo_launcher="$APP_HOME/$LAUNCHER_NAME"
-            if [ -f "$repo_launcher" ] \
-               && [ "$SELF_PATH" != "$(readlink -f "$repo_launcher")" ]; then
-              exec "$repo_launcher" --supervise
-            fi
-            exec "$SELF_PATH" --supervise
-          fi
-          # Code (not the launcher) changed: just restart the daemon to pick it
-          # up. SIGUSR1 stops it WITHOUT powering off the TV (that's only for real
-          # shutdowns, which arrive as SIGTERM).
-          log "Restarting daemon to apply updates."
-          kill -USR1 "$daemon_pid" 2>/dev/null || kill "$daemon_pid" 2>/dev/null
-        fi
-      fi
     done
 
     wait "$daemon_pid" 2>/dev/null
@@ -300,13 +418,27 @@ main() {
   if [ "${LGTV_EASY_HANDOFF:-0}" = "1" ]; then
     log "Running the up-to-date launcher."
   else
+    banner
+    say "  ${C_DIM}Checking dependencies...${C_RESET}"
     install_deps
     if [ "$NO_UPDATE" = "1" ]; then
-      log "Auto-update disabled (LGTV_EASY_NO_UPDATE=1); using the on-disk copy."
+      say "  ${C_DIM}[-]  Updates are off (LGTV_EASY_NO_UPDATE=1); using the copy on disk.${C_RESET}"
     else
-      sync_repo || log "Continuing with existing copy."
+      sync_repo || true
+      report_update
+      # New code arrived, so any daemon still running is by definition stale -
+      # and it may be one we did not start (the login autostart), holding the
+      # single-instance lock. Retire it here, before our own child queues up
+      # behind it forever. Without this the update lands on disk and never runs.
+      if sync_changed; then
+        retire_stale_daemon
+      fi
       maybe_self_update "$@"
     fi
+    say "  ${C_DIM}App folder : $APP_HOME${C_RESET}"
+    say "  ${C_DIM}Log file   : $LOG_FILE${C_RESET}"
+    say "${C_ACC}${RULE}${C_RESET}"
+    say ""
   fi
 
   case "${1:-}" in

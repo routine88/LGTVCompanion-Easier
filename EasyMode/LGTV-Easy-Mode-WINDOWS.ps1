@@ -4,11 +4,18 @@
   One script that:
     1. Installs dependencies (git + Python, via winget; tkinter ships with the
        official Python installer).
-    2. Clones or updates the app from GitHub - INCLUDING updates to this very
-       launcher (it re-runs itself if the script changed).
+    2. Updates the app from GitHub - INCLUDING updates to this very launcher
+       (it re-runs itself if the script changed) - and REPORTS what happened:
+       updated (with what arrived), already current, or couldn't reach GitHub.
+       An update that silently does nothing is the failure this reporting
+       exists to make impossible.
     3. Opens the graphical setup window on first use (text wizard if headless).
-    4. Supervises the idle daemon in the background, restarting it if it crashes
-       and periodically pulling updates. All errors go to a persistent log.
+    4. Supervises the idle daemon in the background, restarting it if it crashes.
+       All errors go to a persistent log.
+
+  Updates are applied WHEN YOU RUN THIS LAUNCHER, and at no other time. There is
+  deliberately no periodic background check: a watcher that rewrites its own code
+  and restarts itself midway through an evening is a surprise, not a feature.
 
   Usage (from PowerShell, or just double-click Windows Launch.bat):
     .\LGTV-Easy-Mode-WINDOWS.ps1              # set up if needed, then supervise
@@ -32,9 +39,8 @@ $RepoUrl    = if ($env:LGTV_EASY_REPO)   { $env:LGTV_EASY_REPO }   else { "https
 $RepoBranch = if ($env:LGTV_EASY_BRANCH) { $env:LGTV_EASY_BRANCH } else { "master" }
 $AppHome    = if ($env:LGTV_EASY_APP_HOME) { $env:LGTV_EASY_APP_HOME } else { Join-Path $env:LOCALAPPDATA "lgtv-companion-easy\app" }
 $StateDir   = if ($env:LGTV_EASY_HOME) { $env:LGTV_EASY_HOME } else { Join-Path $env:APPDATA "LGTV Companion Easy Mode" }
-$UpdateEvery = if ($env:LGTV_EASY_UPDATE_INTERVAL) { [int]$env:LGTV_EASY_UPDATE_INTERVAL } else { 3600 }
-# Set LGTV_EASY_NO_UPDATE=1 to freeze the code: no git fetch/clone, no
-# self-update, no periodic pulls. Run only the code already on disk.
+# Set LGTV_EASY_NO_UPDATE=1 to freeze the code: no git fetch/clone and no
+# self-update. Run only the code already on disk.
 $NoUpdate = ($env:LGTV_EASY_NO_UPDATE -eq "1")
 # The Python app and this launcher both live in the EasyMode/ subdirectory of
 # the cloned repo; the .bat shim at the repo root points into here.
@@ -56,10 +62,36 @@ $LauncherStartHash = if ($SelfPath -and (Test-Path $SelfPath)) {
     (Get-FileHash $SelfPath).Hash
 } else { "none" }
 
+# Two audiences, two functions. Log() keeps the timestamped engineering record;
+# Say() talks to the person watching the window - and is recorded too, so a
+# pasted log tells the same story the window did.
+#
+# On the console Log() drops the timestamp and [launcher] tag and dims the line:
+# they are what a log needs and exactly what a person reading a window does not,
+# and burying the progress that matters in machine prefixes is what made these
+# launchers feel barebones. The file above keeps the full form either way.
+#
+# ASCII only in all of this - it has to survive a legacy cp437/cp1252 console,
+# which is precisely where a confused user ends up reading it.
+$Rule = "======================================================================"
+
 function Log($msg) {
     $line = "{0} [launcher] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
     Add-Content -Path $LogFile -Value $line
-    Write-Host $line
+    Write-Host ("  " + $msg) -ForegroundColor DarkGray
+}
+
+function Say([string]$msg, [string]$colour = "Gray") {
+    Write-Host $msg -ForegroundColor $colour
+    Add-Content -Path $LogFile -Value ("{0} [ui] {1}" -f `
+        (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg.Trim())
+}
+
+function Banner {
+    Write-Host ""
+    Write-Host $Rule -ForegroundColor Cyan
+    Write-Host "  LGTV Companion Easy Mode" -ForegroundColor White
+    Write-Host $Rule -ForegroundColor Cyan
 }
 
 function Have($cmd) { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
@@ -193,19 +225,124 @@ function Require-Python {
 }
 
 # ---- repository / self-update ----------------------------------------------
+# Outcome of the last Sync-Repo, so the caller can both REPORT it and decide
+# whether anything actually needs restarting. Previously the caller could only
+# tell "git didn't error", which is not the same question at all - it restarted
+# the daemon on every check whether or not a single byte had changed.
+#   $script:SyncResult : cloned | updated | current | offline | failed
+$script:SyncResult   = ""
+$script:SyncOld      = ""
+$script:SyncNew      = ""
+$script:SyncCount    = 0
+$script:SyncSubjects = @()
+
+function Repo-Head {
+    if (-not (Test-Path (Join-Path $AppHome ".git"))) { return "" }
+    $h = (& git -C $AppHome rev-parse --short HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0) { return "" }
+    return ("" + $h).Trim()
+}
+
+function Repo-Age {
+    $a = (& git -C $AppHome log -1 --format=%cr 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $a) { return "unknown age" }
+    return ("" + $a).Trim()
+}
+
 function Sync-Repo {
+    $script:SyncResult = ""; $script:SyncOld = ""; $script:SyncNew = ""
+    $script:SyncCount = 0; $script:SyncSubjects = @()
     if (-not (Test-Path (Join-Path $AppHome ".git"))) {
         Log "Cloning $RepoUrl into $AppHome"
         New-Item -ItemType Directory -Force -Path (Split-Path $AppHome) | Out-Null
         git clone --branch $RepoBranch $RepoUrl $AppHome 2>&1 | Add-Content $LogFile
-        return ($LASTEXITCODE -eq 0)
+        if ($LASTEXITCODE -eq 0) {
+            $script:SyncResult = "cloned"; $script:SyncNew = Repo-Head
+        } else {
+            $script:SyncResult = "failed"; Log "ERROR: clone failed"
+        }
+        return
     }
-    Log "Updating from GitHub ($RepoBranch)"
+    $script:SyncOld = Repo-Head
+    Log "Checking GitHub for updates ($RepoBranch)"
     git -C $AppHome fetch --quiet origin $RepoBranch 2>&1 | Add-Content $LogFile
-    if ($LASTEXITCODE -ne 0) { Log "Fetch failed (offline?); using local copy."; return $true }
+    if ($LASTEXITCODE -ne 0) {
+        $script:SyncResult = "offline"; $script:SyncNew = $script:SyncOld
+        Log "Fetch failed (offline?); keeping the copy on disk."
+        return
+    }
     git -C $AppHome checkout --quiet $RepoBranch 2>&1 | Add-Content $LogFile
     git -C $AppHome reset --hard "origin/$RepoBranch" 2>&1 | Add-Content $LogFile
-    return $true
+    if ($LASTEXITCODE -ne 0) {
+        $script:SyncResult = "failed"; $script:SyncNew = $script:SyncOld
+        Log "ERROR: could not apply the update."
+        return
+    }
+    $script:SyncNew = Repo-Head
+    if ($script:SyncNew -eq $script:SyncOld) { $script:SyncResult = "current"; return }
+    $script:SyncResult = "updated"
+    # A force-push can leave the old commit unreachable, so this is best-effort
+    # decoration - never let it turn a good update into a reported failure.
+    $subjects = @(& git -C $AppHome log --format=%s "$($script:SyncOld)..$($script:SyncNew)" 2>$null)
+    if ($LASTEXITCODE -ne 0) { $subjects = @() }
+    $script:SyncCount    = @($subjects).Count
+    $script:SyncSubjects = @($subjects | Select-Object -First 6)
+}
+
+# True only when new code actually arrived - the trigger for restarting anything.
+function Sync-Changed {
+    return ($script:SyncResult -eq "updated" -or $script:SyncResult -eq "cloned")
+}
+
+# Say plainly whether the update worked. "It launched" and "it updated" are
+# different claims, and only one of them used to be visible.
+function Report-Update {
+    switch ($script:SyncResult) {
+        "cloned"  { Say ("  [ok] Installed from GitHub (" + $script:SyncNew + ")") "Green" }
+        "updated" {
+            Say ("  [ok] Updated " + $script:SyncOld + " -> " + $script:SyncNew +
+                 "  (" + $script:SyncCount + " new)") "Green"
+            foreach ($s in $script:SyncSubjects) { Say ("         - " + $s) "DarkGray" }
+        }
+        "current" { Say ("  [ok] Already up to date (" + $script:SyncNew + ", " + (Repo-Age) + ")") "Green" }
+        "offline" {
+            Say "  [!]  Could not reach GitHub - update SKIPPED." "Yellow"
+            Say ("       Running the copy already on disk (" + $script:SyncNew +
+                 ", " + (Repo-Age) + ").") "DarkGray"
+        }
+        "failed"  {
+            Say ("  [X]  Update FAILED - see " + $LogFile) "Red"
+            Say ("       Running the copy already on disk (" + (Repo-Head) + ").") "DarkGray"
+        }
+        default   { Say "  [-]  Update check skipped." "DarkGray" }
+    }
+}
+
+# Retire whatever daemon holds the single-instance lock, so newly-pulled code is
+# actually loaded.
+#
+# THE trap this exists for: Python reads its source once, at process start. A
+# daemon started at LOGIN (the Startup-folder entry, as pythonw) holds the lock
+# for the whole session, so after an update the supervisor's own child just
+# queues behind it forever and the app stays pinned to old code with nothing on
+# screen to say so. Restarting our own child is not enough, because the holder
+# is often not our child - on Windows this looked exactly like an update that
+# simply never took.
+#
+# A forced stop is TerminateProcess: it does NOT run the console control
+# handler, so unlike a real shutdown event this leaves the TV exactly as it is.
+function Retire-StaleDaemon {
+    $daemonPidFile = Join-Path $StateDir "daemon.pid"
+    $dp = Get-LivePid $daemonPidFile "python*"
+    if (-not $dp) { return }
+    Log "Retiring daemon pid $dp so the new code is loaded."
+    try {
+        Stop-Process -Id $dp -Force -ErrorAction Stop
+        Remove-Item $daemonPidFile -ErrorAction SilentlyContinue
+        Log "Daemon pid $dp stood down."
+    } catch {
+        Log "WARNING: could not retire daemon pid $dp; it may still run old code."
+    }
 }
 
 function Maybe-SelfUpdate {
@@ -281,7 +418,6 @@ function Start-Supervisor {
     # If another watcher (e.g. the login auto-start) already holds the lock, our
     # daemon child should wait for it rather than spin-restart.
     $env:LGTV_EASY_WAIT_LOCK = "1"
-    $lastUpdate = Get-Date
     try {
         while ($true) {
             Log "Starting idle daemon."
@@ -294,17 +430,13 @@ function Start-Supervisor {
                 -WorkingDirectory (App-Dir) -NoNewWindow -PassThru `
                 -RedirectStandardError $WatcherLog -RedirectStandardOutput $WatcherOutLog
             $script:DaemonProc = $proc
+            # Watch the daemon. There is deliberately no update check in here:
+            # updates are applied when the user runs the launcher, so a watcher
+            # never rewrites its own code and restarts itself out from under
+            # someone mid-evening. (The old hourly check also restarted the
+            # daemon on EVERY pass, whether or not anything had changed.)
             while (-not $proc.HasExited) {
                 Start-Sleep -Seconds 15
-                if (-not $NoUpdate -and ((Get-Date) - $lastUpdate).TotalSeconds -ge $UpdateEvery) {
-                    $lastUpdate = Get-Date
-                    Log "Periodic update check."
-                    if (Sync-Repo) {
-                        Maybe-SelfUpdate
-                        Log "Restarting daemon to apply updates."
-                        try { $proc.Kill() } catch {}
-                    }
-                }
             }
             Log "Daemon exited (code $($proc.ExitCode)). Restarting in 5s."
             Start-Sleep -Seconds 5
@@ -380,15 +512,28 @@ trap {
 if ($env:LGTV_EASY_HANDOFF -eq "1") {
     Log "Running the up-to-date launcher."
 } else {
+    Banner
+    Say "  Checking dependencies..." "DarkGray"
     Install-Deps
     Log-Diagnostics
     Require-Python
     if ($NoUpdate) {
-        Log "Auto-update disabled (LGTV_EASY_NO_UPDATE=1); using the on-disk copy."
+        Say "  [-]  Updates are off (LGTV_EASY_NO_UPDATE=1); using the copy on disk." "DarkGray"
     } else {
-        Sync-Repo | Out-Null
+        Sync-Repo
+        Report-Update
+        # New code arrived, so any daemon still running is by definition stale -
+        # and it may be one we did not start (the Startup-folder entry at login),
+        # holding the single-instance lock. Retire it here, before our own child
+        # queues up behind it forever. Without this the update lands on disk and
+        # never actually runs, which is exactly what it looked like in practice.
+        if (Sync-Changed) { Retire-StaleDaemon }
         Maybe-SelfUpdate
     }
+    Say ("  App folder : " + $AppHome) "DarkGray"
+    Say ("  Log file   : " + $LogFile) "DarkGray"
+    Write-Host $Rule -ForegroundColor Cyan
+    Write-Host ""
 }
 
 if ($Setup) {

@@ -21,13 +21,19 @@ set "LOCAL_PS1=%~dp0EasyMode\LGTV-Easy-Mode-WINDOWS.ps1"
 
 REM Prefer the auto-updated internal copy; fall back to the one in the EasyMode
 REM folder beside this file (needed for the very first run, before any clone).
+REM Which of the two is in play is worth SAYING: if this is still the first-run
+REM copy, the install has never completed, and that is exactly the state where
+REM someone wonders why an update "did nothing".
 set "PS1=%LOCAL_PS1%"
+set "WHICH=first-run copy beside this file - not installed yet"
 if exist "%APP_PS1%" set "PS1=%APP_PS1%"
+if exist "%APP_PS1%" set "WHICH=installed, self-updating copy"
 
 if not exist "%PS1%" goto :nolauncher
 
-echo Starting LGTV Companion Easy Mode... ^(this window will stay open^)
-echo.
+echo Starting LGTV Companion Easy Mode...
+echo   Launcher: %WHICH%
+echo   This window stays open so you can read what happened.
 powershell.exe -ExecutionPolicy Bypass -NoProfile -File "%PS1%" -Background %*
 set "RC=%ERRORLEVEL%"
 
@@ -46,6 +52,8 @@ echo ----------------------------------------------------------------------
 echo  The launcher exited with an error ^(code %RC%^).
 echo  Scroll up to read the messages above - they explain what went wrong,
 echo  and can be shared to get help.
+echo.
+echo  Full log: %APPDATA%\LGTV Companion Easy Mode\launcher.log
 echo ----------------------------------------------------------------------
 pause
 endlocal

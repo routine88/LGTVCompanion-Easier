@@ -124,6 +124,78 @@ def test_windows_supervisor_guards_against_a_second_watcher():
     assert "not starting another" in sh
 
 
+def test_launchers_retire_the_daemon_holding_the_lock_after_an_update():
+    """The update that lands on disk and never runs.
+
+    Python reads its source once, at process start. A daemon started at LOGIN
+    (Linux .desktop, Windows Startup-folder .cmd) holds the single-instance lock
+    for the whole session, so a launcher that only restarts its OWN child leaves
+    the real holder running old code forever - and its child just queues behind
+    the lock. Both machines hit this; on Windows it looked exactly like an
+    update that silently did nothing.
+
+    So each launcher must reach for the DAEMON's pidfile, not just its child.
+    """
+    ps1 = _read(WIN_PS1)
+    sh = _read(LINUX_SH)
+    assert "function Retire-StaleDaemon" in ps1
+    assert "retire_stale_daemon()" in sh
+    assert "daemon.pid" in ps1 and "DAEMON_PID_FILE" in sh, (
+        "retiring the stale daemon means finding it via the daemon pidfile "
+        "(the single-instance lock), not via the launcher's own child handle")
+    # And it must actually be wired to the update, not merely defined.
+    assert "Retire-StaleDaemon" in ps1.split("function Retire-StaleDaemon")[1], (
+        "Retire-StaleDaemon is defined but never called")
+    assert "retire_stale_daemon" in sh.split("retire_stale_daemon()")[1], (
+        "retire_stale_daemon is defined but never called")
+
+
+def test_linux_retire_never_uses_sigterm():
+    """SIGTERM is the daemon's "the machine is shutting down" signal and powers
+    the TV OFF. Retiring a stale daemon must never look like a shutdown."""
+    sh = _read(LINUX_SH)
+    body = sh.split("retire_stale_daemon()")[1].split("\n}")[0]
+    assert "-USR1" in body, "retiring should stop the daemon with SIGUSR1"
+    assert "-TERM" not in body and "SIGTERM" not in body, (
+        "retiring a stale daemon must not use SIGTERM - that powers the TV off")
+
+
+def test_launchers_report_whether_the_update_worked():
+    """"It launched" and "it updated" are different claims. The launcher has to
+    distinguish updated / already-current / offline / failed, or a silently
+    skipped update is indistinguishable from a successful one."""
+    ps1 = _read(WIN_PS1)
+    sh = _read(LINUX_SH)
+    for name, text in (("Windows", ps1), ("Linux", sh)):
+        for state in ("updated", "current", "offline", "failed"):
+            assert state in text, f"{name} launcher never reports '{state}'"
+        assert "Already up to date" in text, f"{name} launcher: no up-to-date message"
+        assert "Could not reach GitHub" in text, f"{name} launcher: no offline message"
+        assert "Update FAILED" in text, f"{name} launcher: no failure message"
+
+
+def test_launchers_only_restart_when_code_actually_changed():
+    """The old code restarted the daemon on every periodic check regardless, so
+    a no-op check still dropped the TV connection. Gate it on a real change."""
+    ps1 = _read(WIN_PS1)
+    sh = _read(LINUX_SH)
+    assert "function Sync-Changed" in ps1 and "if (Sync-Changed)" in ps1
+    assert "sync_changed()" in sh and "if sync_changed; then" in sh
+
+
+def test_launchers_do_not_poll_for_updates_in_the_background():
+    """Updates apply when the user runs the launcher, and at no other time: a
+    watcher that rewrites its own code mid-evening and restarts itself is a
+    surprise, not a feature."""
+    ps1 = _read(WIN_PS1)
+    sh = _read(LINUX_SH)
+    for name, text in (("Windows", ps1), ("Linux", sh)):
+        assert "LGTV_EASY_UPDATE_INTERVAL" not in text, (
+            f"{name} launcher still has a periodic update interval")
+        assert "Periodic update check" not in text, (
+            f"{name} launcher still polls for updates in the background")
+
+
 def test_windows_supervisor_does_not_redirect_both_streams_to_one_file():
     # PowerShell's Start-Process raises a terminating error when standard output
     # and standard error are redirected to the SAME file - that would crash the
