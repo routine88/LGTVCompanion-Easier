@@ -16,6 +16,11 @@ jobs:
   build:
     name: Build the .exe and installer
     runs-on: windows-latest
+    # Repository workflow tokens are read-only by default, so the last step -
+    # attaching the installer to the release - failed with "Resource not
+    # accessible by integration" while everything before it passed.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
