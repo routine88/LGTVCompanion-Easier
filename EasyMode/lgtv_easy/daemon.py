@@ -695,8 +695,21 @@ class Daemon:
             name = getattr(watcher, "backend_name", "?")
             if name and name != "none":
                 self.logger.info("Following PC sleep (backend: %s).", name)
+            else:
+                # No OS hook here: say so, so "the TV never sleeps with the PC"
+                # always has a line in the log explaining itself.
+                self.logger.info(
+                    "Not following PC sleep: no supported hook on this system. "
+                    "The TV will still blank on the idle timeout.")
         except Exception as exc:  # noqa: BLE001 - the feature is best-effort
-            self.logger.debug("Sleep watcher unavailable: %s", exc)
+            # WARNING, not debug. The feature is best-effort, but its failure is
+            # not cosmetic: the TV silently stops following the PC into sleep
+            # while the setting still reads ON. A registration bug did exactly
+            # that on every Windows machine for months, unnoticed, because this
+            # line was invisible.
+            self.logger.warning(
+                "Could not follow PC sleep (%s). The TV will NOT blank when the "
+                "PC sleeps; it will still blank on the idle timeout.", exc)
             self._sleep_watcher = None
 
     def _stop_sleep_watcher(self) -> None:

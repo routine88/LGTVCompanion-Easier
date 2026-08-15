@@ -9,5 +9,5 @@ It implements the LG WebOS (SSAP) control protocol directly over the network, so
 nothing extra has to run on the TV or anywhere else.
 """
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 APP_NAME = "LGTV Companion Easy Mode"

@@ -12,13 +12,25 @@ desktop properly.
 | `windows/app.spec` | PyInstaller recipe for the two application executables |
 | `windows/installer.py` | the installer/uninstaller program itself |
 | `windows/installer.spec` | packs the app *inside* a one-file `Setup.exe` |
-| `windows/shortcuts.py` | creates `.lnk` files carrying an AppUserModelID |
 | `windows/build.ps1` | builds all of the above |
 | `linux/install.sh` | installs, with menu entry, icons and desktop shortcut |
 | `linux/uninstall.sh` | removes it again |
 
 The artwork itself lives in `EasyMode/lgtv_easy/assets/` — inside the package, so
 the running app finds it identically from source, from pip, or frozen in an exe.
+The shortcut writer lives in the package too, as `lgtv_easy/winshortcut.py`:
+the installer uses it for the Start Menu and desktop icons, and `autostart` uses
+it for the login entry.
+
+**The built installer is committed at the repository root** as
+`LGTVCompanionEasyMode-Setup.exe`, so anyone who downloads the project as a zip
+can just run it. After changing anything the app ships, rebuild and refresh that
+copy:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1
+Copy-Item packaging\windows\dist\LGTVCompanionEasyMode-Setup.exe . -Force
+```
 
 ## Windows
 
@@ -60,6 +72,19 @@ Setup.exe /uninstall [/S] [/purge]
 
 Every run appends to `%TEMP%\lgtv-easy-setup.log`.
 
+### Nothing may open a terminal
+
+The app is a windowed executable, and everything that starts it on the user's
+behalf runs it **directly**:
+
+- the login entry is a `.lnk` in the Startup folder, not a `.cmd` (cmd.exe there
+  means a black window flashing up at every single login)
+- both Scheduled Tasks - the logon fallback and the power-off-at-shutdown hook -
+  name the executable in their action, rather than `cmd /c <wrapper.cmd>`
+
+`lgtv-easy.exe` is the console build, and is only ever run by a human in a
+terminal that is already open.
+
 ### Why the shortcuts are not made with WScript.Shell
 
 An app that calls `SetCurrentProcessExplicitAppUserModelID` — which Easy Mode
@@ -67,8 +92,8 @@ does, so its windows stop being filed under `python.exe` — must stamp the *sam
 id onto its shortcuts. Windows compares the two to decide whether a running
 window belongs to a pinned shortcut; when only one side has an id, pinning the
 app leaves a second, dead taskbar button beside the live one. `WScript.Shell`
-cannot set that property, so `shortcuts.py` drives `IShellLink` and
-`IPropertyStore` through ctypes instead. The id is `LGTVCompanion.EasyMode`,
+cannot set that property, so `lgtv_easy/winshortcut.py` drives `IShellLink`
+and `IPropertyStore` through ctypes instead. The id is `LGTVCompanion.EasyMode`,
 defined in `lgtv_easy/branding.py`; a test keeps the two files in step.
 
 ### Signing
@@ -120,6 +145,9 @@ the small sizes — a one-size `.ico` is the usual cause of a blurry taskbar ico
 
 1. Bump `__version__` in `EasyMode/lgtv_easy/__init__.py` (both specs read it).
 2. `python -m pytest` in `EasyMode/`.
-3. `packaging\windows\build.ps1` and attach `LGTVCompanionEasyMode-Setup.exe`.
-4. Linux users install from the source archive with `install.sh`; there is
+3. `packaging\windows\build.ps1`, then copy the installer over the committed
+   copy at the repository root and commit it.
+4. Tag `easy-mode-v<version>`; the Windows installer workflow rebuilds it on a
+   clean runner, install-tests it, and attaches it to the release.
+5. Linux users install from the source archive with `install.sh`; there is
    nothing to build.

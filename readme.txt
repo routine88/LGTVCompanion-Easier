@@ -9,15 +9,19 @@ simple window, almost nothing to configure.
 
 INSTALL IT
 ----------
-  Windows : run   LGTVCompanionEasyMode-Setup.exe
+  Windows : run   LGTVCompanionEasyMode-Setup.exe   (it's right here in this
+            folder)
             You get a desktop icon and a Start Menu entry, and it can start
-            watching for idle automatically when you log in. It installs for
-            your account only, so it never asks for an administrator, and it
-            uninstalls from Settings -> Apps like any other program.
+            watching for idle automatically when you log in. Nothing opens a
+            terminal: the app is a real Windows program, and it starts at login
+            through a shortcut rather than a batch file.
+            It installs for your account only, so it never asks for an
+            administrator, and it uninstalls from Settings -> Apps like any
+            other program.
 
-            No Setup.exe next to this file? Download the latest from
+            Newer builds are also at
               https://github.com/routine88/LGTVCompanion-Easier/releases
-            or build one yourself - see BUILDING below.
+            or build your own - see BUILDING below.
 
   Linux   : open a terminal in this folder and run
                 sh packaging/linux/install.sh

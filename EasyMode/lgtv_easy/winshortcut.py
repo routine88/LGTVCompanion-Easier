@@ -1,5 +1,10 @@
 """Create Windows shortcuts (.lnk) that the taskbar treats as a real app.
 
+Used twice: the installer writes the Start Menu and desktop shortcuts with it,
+and :mod:`lgtv_easy.autostart` writes the login entry with it - a shortcut runs
+the executable directly, where the .cmd it replaced meant cmd.exe flashing a
+black window at every login.
+
 ``WScript.Shell`` can make a shortcut in three lines, so why this? Because it
 cannot set one property, and that property is the whole point of the exercise:
 
