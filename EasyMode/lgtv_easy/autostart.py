@@ -50,8 +50,25 @@ def _join(argv) -> str:
     return " ".join(f'"{a}"' if (" " in a or not a) else a for a in argv)
 
 
+def _sandbox() -> str:
+    """A directory to pretend is the machine's start-up configuration.
+
+    Set by the test suite (see tests/conftest.py). Everything else Easy Mode
+    writes already lives under LGTV_EASY_HOME, but auto-start by definition does
+    not: the Startup folder comes from %APPDATA% and a Scheduled Task has no
+    path at all. So a test that answered "no" to "start at login" - several of
+    the wizard tests do - reached straight past the temporary config directory
+    and deleted the *developer's own* login entry and shutdown task. Running the
+    tests must not reconfigure the machine running them.
+    """
+    return os.environ.get("LGTV_EASY_AUTOSTART_SANDBOX", "")
+
+
 # ----- Windows: Startup folder ------------------------------------------------
 def _startup_target() -> Path:
+    sandbox = _sandbox()
+    if sandbox:
+        return Path(sandbox) / "Startup" / "LGTV-Easy-Mode.cmd"
     base = os.environ.get("APPDATA") or str(Path.home())
     return (Path(base) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
             / "Startup" / "LGTV-Easy-Mode.cmd")
@@ -73,6 +90,12 @@ def _task_wrapper_path() -> Path:
 
 
 def _run(args) -> "tuple[int, str]":
+    if _sandbox():
+        # Scheduled Tasks are machine-wide and have no path to redirect, so the
+        # only safe thing inside the sandbox is not to call schtasks at all.
+        # Reporting failure reads as "there is no task", which is true of the
+        # pretend machine the tests are running against.
+        return 1, "schtasks not run (LGTV_EASY_AUTOSTART_SANDBOX is set)"
     try:
         proc = subprocess.run(args, capture_output=True, text=True, timeout=20)
         return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
@@ -196,7 +219,8 @@ def disable_shutdown_hook() -> None:
 
 # ----- Linux: autostart .desktop ----------------------------------------------
 def _linux_target() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    base = _sandbox() or os.environ.get("XDG_CONFIG_HOME") \
+        or str(Path.home() / ".config")
     return Path(base) / "autostart" / f"{APP_ID}.desktop"
 
 

@@ -84,6 +84,41 @@ def test_windows_run_cmd_content_uses_module_run():
     assert body.lower().startswith("@echo off")
 
 
+# ----- the tests must not reconfigure the machine running them ----------
+# Everything else Easy Mode writes lives under LGTV_EASY_HOME. Auto-start
+# cannot: the Startup folder comes from %APPDATA%, a Scheduled Task has no path
+# at all, and the Linux entry follows XDG_CONFIG_HOME. Several wizard tests
+# answer "no" to "start at login", and until the sandbox existed that switched
+# off the login entry belonging to whoever ran the suite - on this machine it
+# really did, mid-session.
+def test_the_sandbox_keeps_the_startup_entry_out_of_the_real_profile(tmp_path,
+                                                                     monkeypatch):
+    monkeypatch.delenv("LGTV_EASY_AUTOSTART_SANDBOX", raising=False)
+    real = autostart._startup_target()          # where a real install writes
+    monkeypatch.setenv("LGTV_EASY_AUTOSTART_SANDBOX", str(tmp_path))
+    sandboxed = autostart._startup_target()
+
+    assert sandboxed != real
+    assert str(sandboxed).startswith(str(tmp_path))
+
+
+def test_the_sandbox_never_calls_schtasks(tmp_path, monkeypatch):
+    """A Scheduled Task is machine-wide - there is no directory to redirect -
+    so inside the sandbox schtasks must simply not be invoked."""
+    monkeypatch.setenv("LGTV_EASY_AUTOSTART_SANDBOX", str(tmp_path))
+    code, message = autostart._run(["schtasks", "/Delete", "/TN", "anything"])
+    assert code != 0 and "not run" in message
+    assert autostart._task_exists() is False
+
+
+def test_the_suite_is_running_inside_the_sandbox():
+    """conftest sets it for the whole run; without that the guard above is
+    just decoration."""
+    import os as _os
+    assert _os.environ.get("LGTV_EASY_AUTOSTART_SANDBOX"), \
+        "tests/conftest.py should point auto-start at a throwaway directory"
+
+
 # ----- the installed (frozen) build ------------------------------------
 # An installed copy is an .exe, not a script. Every entry written here has to
 # say so, or logging in runs `"...\LGTV Companion Easy Mode.exe" -m lgtv_easy
