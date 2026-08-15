@@ -82,3 +82,51 @@ def test_windows_run_cmd_content_uses_module_run():
     body = autostart._windows_run_cmd_content()
     assert "-m lgtv_easy run" in body
     assert body.lower().startswith("@echo off")
+
+
+# ----- the installed (frozen) build ------------------------------------
+# An installed copy is an .exe, not a script. Every entry written here has to
+# say so, or logging in runs `"...\LGTV Companion Easy Mode.exe" -m lgtv_easy
+# run` - which the app reads as junk arguments and refuses to start, silently,
+# at every login.
+def _pretend_frozen(monkeypatch, tmp_path):
+    import sys
+    from lgtv_easy import branding
+    exe = tmp_path / branding.GUI_EXE
+    exe.write_bytes(b"")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe))
+    return exe
+
+
+def test_frozen_login_entry_runs_the_exe_not_the_module(tmp_path, monkeypatch):
+    exe = _pretend_frozen(monkeypatch, tmp_path)
+    body = autostart._windows_run_cmd_content()
+    assert f'"{exe}" run' in body
+    assert "-m lgtv_easy" not in body
+    # ...and it starts in the folder the app was installed into.
+    assert f'cd /d "{tmp_path}"' in body
+
+
+def test_frozen_shutdown_hook_runs_the_exe(tmp_path, monkeypatch):
+    exe = _pretend_frozen(monkeypatch, tmp_path)
+    body = autostart._shutdown_wrapper_content()
+    assert f'"{exe}" off --only-if-configured' in body
+    assert "-m lgtv_easy" not in body
+
+
+@linux_only
+def test_frozen_linux_autostart_entry_runs_the_exe(tmp_path, monkeypatch):
+    monkeypatch.setattr(autostart.os, "name", "posix")
+    _pretend_frozen(monkeypatch, tmp_path)
+    body = autostart._linux_desktop_content()
+    assert "-m lgtv_easy" not in body
+    assert "Exec=" in body and "run'" in body
+
+
+@linux_only
+def test_linux_autostart_entry_carries_the_icon(tmp_path, monkeypatch):
+    """It shows up in "Startup Applications"; without this it is a blank square."""
+    monkeypatch.setattr(autostart.os, "name", "posix")
+    body = autostart._linux_desktop_content()
+    assert "Icon=" in body and "icon.png" in body

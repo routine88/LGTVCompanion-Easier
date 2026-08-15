@@ -1,0 +1,67 @@
+name: Windows installer
+
+# Builds LGTVCompanionEasyMode-Setup.exe so a release does not depend on
+# somebody's laptop. Deliberately not part of the ordinary test workflow: it
+# takes minutes and produces a 20 MB artifact, so it runs on demand and when a
+# version tag is pushed.
+on:
+  workflow_dispatch:
+  push:
+    # Easy Mode has its own version line, deliberately namespaced: this is a
+    # fork of a project whose own releases are tagged v5.x, and a bare "v1.0.0"
+    # sitting among those would read as an ancient build of the wrong app.
+    tags: ["easy-mode-v*"]
+
+jobs:
+  build:
+    name: Build the .exe and installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The app must pass its own tests before it is worth packaging.
+      - name: Test
+        working-directory: EasyMode
+        run: |
+          python -m pip install --upgrade pip pytest
+          python -m pytest -q
+
+      - name: Build
+        run: powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1
+
+      # Prove the artifact runs on a machine that never saw the source: install
+      # it silently, check the shortcut and the registry entry, then remove it.
+      - name: Install it, then uninstall it
+        shell: pwsh
+        run: |
+          $setup = "packaging\windows\dist\LGTVCompanionEasyMode-Setup.exe"
+          Start-Process -FilePath $setup -ArgumentList "/S","/autostart=0","/launch=0" -Wait
+          $dir = "$env:LOCALAPPDATA\Programs\LGTV Companion Easy Mode"
+          $lnk = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\LGTV Companion Easy Mode.lnk"
+          if (-not (Test-Path "$dir\LGTV Companion Easy Mode.exe")) { throw "app was not installed" }
+          if (-not (Test-Path $lnk)) { throw "no Start Menu shortcut" }
+          $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\LGTVCompanionEasyMode"
+          if (-not (Test-Path $key)) { throw "not registered in Add/Remove Programs" }
+          & "$dir\lgtv-easy.exe" --version
+          Start-Process -FilePath "$dir\uninstall.exe" -ArgumentList "/uninstall","/S" -Wait
+          Start-Sleep -Seconds 8
+          if (Test-Path $dir) { throw "uninstall left $dir behind" }
+          if (Test-Path $lnk) { throw "uninstall left the shortcut behind" }
+          Write-Host "install -> verify -> uninstall: OK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LGTVCompanionEasyMode-Setup
+          path: packaging/windows/dist/LGTVCompanionEasyMode-Setup.exe
+          if-no-files-found: error
+
+      # On a version tag, the installer becomes a downloadable release asset.
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/easy-mode-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packaging/windows/dist/LGTVCompanionEasyMode-Setup.exe

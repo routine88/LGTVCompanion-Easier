@@ -27,6 +27,7 @@ from typing import Optional
 
 from . import __version__
 from . import autostart as autostart_mod
+from . import branding
 from .config import Config, Device, fmt_timeout
 from .daemon import Daemon
 from . import idle as idle_mod
@@ -315,6 +316,142 @@ class SteppedSlider(ttk.Frame):
         self._refresh()
 
 
+def usable_screen(window: tk.Misc) -> "tuple[int, int]":
+    """How big a window may get here without running off the display.
+
+    ``wm_maxsize`` is the honest answer on Windows - it already excludes the
+    taskbar - and falls back to the raw screen size elsewhere, where a margin
+    covers the title bar and any panel/dock. Everything that sizes a window
+    routes through this, because a window taller than the screen is the one
+    shape a user cannot fix: the bottom of it is simply unreachable.
+    """
+    try:
+        max_w, max_h = window.wm_maxsize()
+    except tk.TclError:  # pragma: no cover - no window manager
+        max_w = max_h = 0
+    screen_w, screen_h = window.winfo_screenwidth(), window.winfo_screenheight()
+    max_w = min(max_w or screen_w, screen_w)
+    max_h = min(max_h or screen_h, screen_h)
+    return max(360, max_w - 40), max(320, max_h - 80)
+
+
+class ScrollArea(ttk.Frame):
+    """A vertically scrolling viewport. Add content to ``.inner``.
+
+    Why this exists: the window used to grow to whatever height the active panel
+    asked for and pin that as its minimum, on the theory that "this app never
+    scrolls". On a laptop - or any 1080p screen once the deep power-off slider
+    and the warning banner are both showing - the panel is taller than the
+    display, so the bottom cards were drawn off-screen with no way to reach
+    them: the window could not be shrunk (minsize) and would not scroll.
+
+    So the viewport keeps asking for exactly the height its content wants, up to
+    a ceiling the window sets from the screen size (:meth:`set_max_height`).
+    Below the ceiling nothing changes and no scrollbar appears; above it, the
+    bar appears and every control stays reachable.
+    """
+
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, **kwargs)
+        self._max_height = 10_000
+        self._applied = (0, 0)
+
+        # A fixed scroll unit (rather than Tk's default tenth-of-a-window) keeps
+        # a wheel notch feeling the same whatever size the window is.
+        self.canvas = tk.Canvas(self, bg=THEME["bg"], highlightthickness=0,
+                                bd=0, takefocus=0, yscrollincrement=20)
+        self.vbar = ttk.Scrollbar(self, orient="vertical",
+                                  command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self._scroll_set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self._bar_shown = False
+
+        self.inner = ttk.Frame(self.canvas)
+        self._window = self.canvas.create_window((0, 0), window=self.inner,
+                                                 anchor="nw")
+        self.inner.bind("<Configure>", self._inner_configured)
+        self.canvas.bind("<Configure>", self._canvas_configured)
+        # Wheel events are bound app-wide and filtered by where the pointer
+        # actually is (see _owns_wheel). Binding them on <Enter> and dropping
+        # them on <Leave> looks tidier and does not work: Tk sends this frame a
+        # Leave the moment the pointer moves onto any widget inside it, so the
+        # wheel would only scroll over the bare gaps between the cards.
+        self.bind_all("<MouseWheel>", self._on_wheel, add="+")   # Windows/macOS
+        self.bind_all("<Button-4>", self._on_wheel, add="+")     # X11 wheel up
+        self.bind_all("<Button-5>", self._on_wheel, add="+")     # X11 wheel down
+
+    # ----- geometry ----------------------------------------------------
+    def set_max_height(self, height: int) -> None:
+        """Cap the viewport; content taller than this scrolls."""
+        self._max_height = max(120, int(height))
+        self._sync_request()
+
+    def _sync_request(self) -> None:
+        """Ask for exactly as much room as the content wants, up to the cap."""
+        want_w = self.inner.winfo_reqwidth()
+        want_h = min(self.inner.winfo_reqheight(), self._max_height)
+        if (want_w, want_h) == self._applied:
+            return
+        self._applied = (want_w, want_h)
+        self.canvas.configure(width=want_w, height=want_h)
+
+    def _inner_configured(self, _event=None) -> None:
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self._sync_request()
+
+    def _canvas_configured(self, event) -> None:
+        # Keep the content as wide as the viewport so cards still fill="x".
+        self.canvas.itemconfigure(self._window, width=event.width)
+
+    def _scroll_set(self, first, last) -> None:
+        """Show the scrollbar only when some of the content is out of view."""
+        needed = not (float(first) <= 0.0 and float(last) >= 1.0)
+        if needed and not self._bar_shown:
+            self.vbar.pack(side="right", fill="y")
+            self._bar_shown = True
+        elif not needed and self._bar_shown:
+            self.vbar.pack_forget()
+            self._bar_shown = False
+        self.vbar.set(first, last)
+
+    def to_top(self) -> None:
+        try:
+            self.canvas.yview_moveto(0.0)
+        except tk.TclError:  # pragma: no cover - destroyed mid-switch
+            pass
+
+    # ----- mouse wheel --------------------------------------------------
+    def _owns_wheel(self, event) -> bool:
+        """False when the pointer is over something that scrolls itself.
+
+        The diagnostics log and the TV list have their own scrollbars; rolling
+        the wheel over one of those should move that list, not the page. Windows
+        sends wheel events to the focused widget rather than the one under the
+        pointer, so the pointer position is what we go by.
+        """
+        widget = self.winfo_containing(event.x_root, event.y_root)
+        while widget is not None:
+            if isinstance(widget, (tk.Text, tk.Listbox)):
+                return False
+            if widget is self:
+                return True
+            widget = getattr(widget, "master", None)
+        return False
+
+    def _on_wheel(self, event):
+        if not self._bar_shown or not self._owns_wheel(event):
+            return
+        if getattr(event, "num", None) == 4:
+            step = -1
+        elif getattr(event, "num", None) == 5:
+            step = 1
+        else:
+            # Windows reports 120 per notch; X11/macOS deliver small deltas.
+            step = -1 if event.delta > 0 else 1
+        self.canvas.yview_scroll(step * 3, "units")
+        return "break"
+
+
 def make_diag(app: "App", parent: tk.Misc, height: int = 6):
     """A read-only, scrollable diagnostics text area + a thread-safe appender.
 
@@ -395,8 +532,10 @@ def show_no_tv_alert(reason: str, dismiss_after: float = 300.0) -> None:
     in front of. Nothing is lost when it closes itself - the reason is in the
     log file, and every later ``status`` still says so.
     """
-    root = tk.Tk()
+    branding.set_app_id()
+    root = tk.Tk(className=branding.WM_CLASS)
     root.title("LGTV Companion Easy Mode")
+    branding.apply_icon(root)
     _apply_theme(root)
     root.resizable(False, False)
     tk.Frame(root, height=3, bg=THEME["danger"]).pack(fill="x")
@@ -405,11 +544,12 @@ def show_no_tv_alert(reason: str, dismiss_after: float = 300.0) -> None:
 
     def open_setup():
         import subprocess
-        import sys
-        from pathlib import Path
         try:
-            subprocess.Popen([sys.executable, "-m", "lgtv_easy", "gui"],
-                             cwd=str(Path(__file__).resolve().parents[1]))
+            # branding.launch_command knows whether we are a frozen .exe or a
+            # source checkout; the watcher that opened this window is neither
+            # necessarily.
+            subprocess.Popen(branding.launch_command("gui"),
+                             cwd=str(branding.app_dir()))
         except Exception:  # noqa: BLE001 - nothing useful to do if it won't start
             pass
         root.destroy()
@@ -424,13 +564,26 @@ def show_no_tv_alert(reason: str, dismiss_after: float = 300.0) -> None:
     root.mainloop()
 
 
+# Smallest the window may be dragged to. It is deliberately well under the
+# height of any panel: the viewport scrolls, so a small window hides nothing,
+# and a laptop screen must always be able to show the whole frame.
+MIN_WIDTH, MIN_HEIGHT = 500, 440
+WANT_WIDTH, WANT_HEIGHT = 540, 715
+
+
 class App(tk.Tk):
     def __init__(self):
-        super().__init__()
+        # Claim the app's taskbar identity before the first window exists, or
+        # Windows will already have filed us under whatever launched us
+        # (python.exe, and its icon) for the life of the process.
+        branding.set_app_id()
+        super().__init__(className=branding.WM_CLASS)
         self.title("LGTV Companion Easy Mode")
-        self.geometry("540x715")
-        self.minsize(520, 640)
+        branding.apply_icon(self)
         _apply_theme(self)
+        avail_w, avail_h = usable_screen(self)
+        self.minsize(min(MIN_WIDTH, avail_w), min(MIN_HEIGHT, avail_h))
+        self.geometry(f"{min(WANT_WIDTH, avail_w)}x{min(WANT_HEIGHT, avail_h)}")
         try:
             self.tk.call("tk", "scaling", 1.2)
         except tk.TclError:
@@ -450,8 +603,15 @@ class App(tk.Tk):
 
         self._install_reload_signal()
         self._build_chrome()
-        self.container = ttk.Frame(self, padding=(PAD + 4, 0, PAD + 4, PAD + 4))
+        # Everything below the brand bar lives in a scrolling viewport, so no
+        # card can ever end up drawn past the bottom of the screen.
+        self.scroll = ScrollArea(self)
+        self.scroll.pack(fill="both", expand=True)
+        self.container = ttk.Frame(self.scroll.inner,
+                                   padding=(PAD + 4, 0, PAD + 4, PAD + 4))
         self.container.pack(fill="both", expand=True)
+        self.bind("<Prior>", lambda _e: self.scroll.canvas.yview_scroll(-1, "pages"))
+        self.bind("<Next>", lambda _e: self.scroll.canvas.yview_scroll(1, "pages"))
         self._show_initial()
 
     # ----- infrastructure ---------------------------------------------
@@ -517,27 +677,40 @@ class App(tk.Tk):
     def show_wizard(self):
         self._clear()
         SetupWizard(self.container, self).pack(fill="both", expand=True)
+        self.scroll.to_top()
         self._fit_to_content()
 
     def show_settings(self):
         self._clear()
         SettingsPanel(self.container, self).pack(fill="both", expand=True)
         self.start_daemon()
+        self.scroll.to_top()
         self._fit_to_content()
 
     def _fit_to_content(self):
-        """Open as tall as the active panel needs - this app never scrolls.
+        """Open as tall as the active panel needs, but never taller than the
+        screen - past that, the viewport scrolls.
 
-        The footer is pinned to the bottom of each panel, so a window shorter
-        than its content silently clips the last card (e.g. the deep power-off
-        slider). Grow to the panel's requested height and pin that as the
-        minimum so it can never be shrunk back into clipping it.
+        Both halves matter. Every panel pins its footer to its own bottom edge,
+        so a window shorter than its content used to silently clip the last card
+        (the deep power-off slider was the usual casualty); growing to the
+        requested height fixes that where there is room. Where there isn't - a
+        laptop, or a 1080p screen showing the warning banner as well - the
+        window stops at the usable screen height and :class:`ScrollArea` takes
+        over, which is why the minimum size stays small instead of being pinned
+        to the content height.
         """
         def fit():
             self.update_idletasks()
-            height = self.winfo_reqheight()
-            width = max(self.winfo_width(), self.winfo_reqwidth())
-            self.minsize(self.minsize()[0], height)
+            avail_w, avail_h = usable_screen(self)
+            # Room the panel can have = the screen, less our own fixed chrome.
+            chrome = max(0, self.winfo_reqheight() - self.scroll.winfo_reqheight())
+            self.scroll.set_max_height(avail_h - chrome)
+            self.update_idletasks()
+            height = min(self.winfo_reqheight(), avail_h)
+            width = min(max(self.winfo_width(), self.winfo_reqwidth(),
+                            WANT_WIDTH), avail_w)
+            self.minsize(min(MIN_WIDTH, avail_w), min(MIN_HEIGHT, height))
             self.geometry(f"{width}x{height}")
         self.after_idle(fit)
 
@@ -1289,8 +1462,12 @@ class RepairDialog(tk.Toplevel):
         self._running = False
         self.title("Repair TV connection")
         self.configure(bg=THEME["bg"])
-        self.geometry("520x470")
-        self.minsize(460, 400)
+        branding.apply_icon(self)
+        # Clamp to the display: this dialog opens on top of a failure, which is
+        # the worst moment for its buttons to be off the bottom of a small screen.
+        avail_w, avail_h = usable_screen(self)
+        self.geometry(f"{min(520, avail_w)}x{min(470, avail_h)}")
+        self.minsize(min(460, avail_w), min(400, avail_h))
         try:
             self.transient(app)
         except tk.TclError:
