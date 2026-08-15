@@ -82,7 +82,7 @@ def test_repair_relocates_and_persists_new_ip(tmp_path, monkeypatch):
     monkeypatch.setattr(netdiag, "tcp_probe", lambda ip, port, timeout=2.0: (False, "no route"))
     with MockTV(require_pairing=False) as tv:
         monkeypatch.setattr(discovery, "locate_tv",
-                            lambda mac, timeout=3.0, log=None: f"127.0.0.1:{tv.port}")
+                            lambda mac, timeout=3.0, log=None, allow_guess=True: f"127.0.0.1:{tv.port}")
         cfg = Config()
         cfg.device = Device(name="t", ip="10.0.0.5", mac="AA:BB:CC:DD:EE:FF",
                             key=tv.known_key)
@@ -104,7 +104,7 @@ def test_repair_relocates_and_persists_new_ip(tmp_path, monkeypatch):
 def test_repair_reports_tv_probably_off_when_nothing_found(monkeypatch):
     monkeypatch.setattr(netdiag, "local_ipv4s", lambda: ["192.168.1.10"])
     monkeypatch.setattr(netdiag, "tcp_probe", lambda ip, port, timeout=2.0: (False, "no route"))
-    monkeypatch.setattr(discovery, "locate_tv", lambda mac, timeout=3.0, log=None: None)
+    monkeypatch.setattr(discovery, "locate_tv", lambda mac, timeout=3.0, log=None, allow_guess=True: None)
     cfg = Config()
     cfg.device = Device(ip="192.168.1.50", mac="AA:BB:CC:DD:EE:FF")  # same subnet
     res = selfheal.repair(cfg)
@@ -115,7 +115,7 @@ def test_repair_reports_tv_probably_off_when_nothing_found(monkeypatch):
 def test_repair_flags_a_subnet_mismatch(monkeypatch):
     monkeypatch.setattr(netdiag, "local_ipv4s", lambda: ["192.168.1.10"])
     monkeypatch.setattr(netdiag, "tcp_probe", lambda ip, port, timeout=2.0: (False, "no route"))
-    monkeypatch.setattr(discovery, "locate_tv", lambda mac, timeout=3.0, log=None: None)
+    monkeypatch.setattr(discovery, "locate_tv", lambda mac, timeout=3.0, log=None, allow_guess=True: None)
     cfg = Config()
     cfg.device = Device(ip="10.0.0.5", mac="AA:BB:CC:DD:EE:FF")  # different subnet
     res = selfheal.repair(cfg)
@@ -126,7 +126,7 @@ def test_repair_flags_a_subnet_mismatch(monkeypatch):
 def test_repair_reports_no_network_when_pc_offline(monkeypatch):
     monkeypatch.setattr(netdiag, "local_ipv4s", lambda: [])
     monkeypatch.setattr(netdiag, "tcp_probe", lambda ip, port, timeout=2.0: (False, "no route"))
-    monkeypatch.setattr(discovery, "locate_tv", lambda mac, timeout=3.0, log=None: None)
+    monkeypatch.setattr(discovery, "locate_tv", lambda mac, timeout=3.0, log=None, allow_guess=True: None)
     cfg = Config()
     cfg.device = Device(ip="10.0.0.5")
     res = selfheal.repair(cfg)
@@ -138,7 +138,7 @@ def test_repair_detects_pairing_rejection_at_a_reachable_ip(monkeypatch):
     # The saved IP answers a TCP probe but the TV refuses the registration.
     monkeypatch.setattr(netdiag, "local_ipv4s", lambda: ["1.2.3.4"])
     monkeypatch.setattr(netdiag, "tcp_probe", lambda ip, port, timeout=2.0: (True, "open"))
-    monkeypatch.setattr(discovery, "locate_tv", lambda mac, timeout=3.0, log=None: None)
+    monkeypatch.setattr(discovery, "locate_tv", lambda mac, timeout=3.0, log=None, allow_guess=True: None)
 
     def reject(client, **kw):
         raise PairingError("registration error")
@@ -183,7 +183,7 @@ def test_cmd_repair_relocates_and_persists(tmp_path, monkeypatch):
     monkeypatch.setattr(netdiag, "tcp_probe", lambda ip, port, timeout=2.0: (False, "no route"))
     with MockTV(require_pairing=False) as tv:
         monkeypatch.setattr(discovery, "locate_tv",
-                            lambda mac, timeout=3.0, log=None: f"127.0.0.1:{tv.port}")
+                            lambda mac, timeout=3.0, log=None, allow_guess=True: f"127.0.0.1:{tv.port}")
         cfg = Config()
         cfg.device = Device(name="t", ip="10.0.0.5", mac="AA:BB:CC:DD:EE:FF",
                             key=tv.known_key)
@@ -209,7 +209,7 @@ def test_cmd_test_self_heals_when_saved_ip_is_dead(tmp_path, monkeypatch):
     monkeypatch.setattr(netdiag, "tcp_probe", lambda ip, port, timeout=2.0: (False, "no route"))
     with MockTV(require_pairing=False) as tv:
         monkeypatch.setattr(discovery, "locate_tv",
-                            lambda mac, timeout=3.0, log=None: f"127.0.0.1:{tv.port}")
+                            lambda mac, timeout=3.0, log=None, allow_guess=True: f"127.0.0.1:{tv.port}")
         cfg = Config()
         cfg.device = Device(name="t", ip="10.0.0.5", mac="AA:BB:CC:DD:EE:FF",
                             key=tv.known_key)

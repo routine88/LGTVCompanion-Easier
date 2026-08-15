@@ -17,7 +17,7 @@ from .webos import WebOSClient, pair_with_fallback
 def connect_tv(cfg: Config, *, on_prompt: Optional[Callable[[], None]] = None,
                prompt_timeout: float = 60.0, timeout: float = 10.0,
                recover: bool = True, discover_timeout: float = 3.0,
-               persist: bool = True,
+               persist: bool = True, allow_guess: bool = True,
                log: Optional[Callable[[str], None]] = None) -> WebOSClient:
     """Return a live, paired client for ``cfg.device`` - relocating it if moved.
 
@@ -26,7 +26,9 @@ def connect_tv(cfg: Config, *, on_prompt: Optional[Callable[[], None]] = None,
     ``cfg.device.ip``, and retries once. Raises the original error if the TV
     still can't be reached. The caller owns the returned client and must close
     it. ``recover=False`` keeps it fast for time-critical paths (e.g. powering
-    the TV off as the PC shuts down).
+    the TV off as the PC shuts down). ``allow_guess=False`` relocates only by
+    MAC, never by adopting the one LG TV that happens to answer - see
+    :func:`discovery.locate_tv`; callers with nobody watching should set it.
     """
     out = log or (lambda _m: None)
 
@@ -45,7 +47,8 @@ def connect_tv(cfg: Config, *, on_prompt: Optional[Callable[[], None]] = None,
             raise
         from .discovery import locate_tv
         out("Saved TV address didn't answer; looking for the TV again...")
-        new_ip = locate_tv(cfg.device.mac, timeout=discover_timeout, log=out)
+        new_ip = locate_tv(cfg.device.mac, timeout=discover_timeout, log=out,
+                           allow_guess=allow_guess)
         if not new_ip:
             raise
         host = new_ip.rpartition(":")[0] if ":" in new_ip else new_ip

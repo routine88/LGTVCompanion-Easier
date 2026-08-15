@@ -253,7 +253,8 @@ def locate_by_mac(mac: str, timeout: float = 3.0,
 
 
 def locate_tv(mac: str = "", timeout: float = 3.0,
-              log: Optional[Callable[[str], None]] = None) -> Optional[str]:
+              log: Optional[Callable[[str], None]] = None,
+              allow_guess: bool = True) -> Optional[str]:
     """Find the TV's current IP, by MAC when we know it, else by discovery.
 
     The one entry point the daemon and the app use to recover a "no TV present"
@@ -262,11 +263,26 @@ def locate_tv(mac: str = "", timeout: float = 3.0,
     back to SSDP and adopts the TV only when exactly one LG/WebOS device answers,
     so it can never silently hijack the wrong device. Returns the IP or ``None``;
     never raises.
+
+    ``allow_guess=False`` drops even that single-TV fallback, so nothing is
+    contacted unless its MAC is the one we paired with. Adopting a TV means
+    connecting to it, and connecting means a registration the TV may not
+    recognise - which it announces by putting "a mobile device wants to
+    connect?" on screen, over whatever its owner is watching. That is a fine
+    thing to risk while somebody is sitting in the app waiting to press Accept,
+    and not something a background watcher should ever do to a household. So
+    the daemon and the silent startup self-test pass False; the paths a person
+    actually asked for keep the fallback.
     """
     out = log or _noop
     from . import netdiag
     if netdiag.canon_mac(mac):
         return locate_by_mac(mac, timeout=timeout, log=log)
+    if not allow_guess:
+        out("No saved MAC to identify the TV by, so not searching: adopting "
+            "some other TV on the network would interrupt whoever is watching "
+            "it. Open the app and use 'Test my TV' to find it.")
+        return None
     # No MAC yet: only adopt an unambiguous single LG TV.
     try:
         lg = [d for d in discover(timeout=timeout, log=out) if d.is_lg]

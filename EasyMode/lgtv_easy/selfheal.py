@@ -163,7 +163,8 @@ def repair(cfg: Config, *, log: Optional[Callable[[str], None]] = None,
            persist: bool = True, connect: bool = False, blink: bool = False,
            on_prompt: Optional[Callable[[], None]] = None,
            discover_timeout: float = 3.0, connect_timeout: float = 8.0,
-           prompt_timeout: float = 8.0) -> RepairResult:
+           prompt_timeout: float = 8.0,
+           allow_guess: bool = True) -> RepairResult:
     """Diagnose why the TV is unreachable and fix it if at all possible.
 
     The escalation, each step narrated through ``log`` and recorded in
@@ -184,6 +185,10 @@ def repair(cfg: Config, *, log: Optional[Callable[[str], None]] = None,
     ``connect=True`` returns the live client (caller closes it); ``connect=False``
     verifies the fix, persists it, and closes the connection - the cheap mode for
     a startup self-test. Never raises.
+
+    ``allow_guess=False`` restricts step 3 to a MAC match, so an unidentified TV
+    is never contacted; pass it whenever no one is sitting in front of the app,
+    because adopting the wrong TV means a pairing prompt on a stranger's screen.
     """
     out_steps: List[str] = []
 
@@ -200,7 +205,8 @@ def repair(cfg: Config, *, log: Optional[Callable[[str], None]] = None,
                             connect=connect, blink=blink, on_prompt=on_prompt,
                             discover_timeout=discover_timeout,
                             connect_timeout=connect_timeout,
-                            prompt_timeout=prompt_timeout)
+                            prompt_timeout=prompt_timeout,
+                            allow_guess=allow_guess)
     except Exception as exc:  # noqa: BLE001 - this routine must never raise
         res.error = str(exc)
         res.ok = False
@@ -210,7 +216,8 @@ def repair(cfg: Config, *, log: Optional[Callable[[str], None]] = None,
 
 
 def _repair_impl(cfg, res, saved, out, *, persist, connect, blink, on_prompt,
-                 discover_timeout, connect_timeout, prompt_timeout):
+                 discover_timeout, connect_timeout, prompt_timeout,
+                 allow_guess=True):
     pc_ips = netdiag.local_ipv4s()
     out("Checking how this PC is connected to the network...")
     netdiag.subnet_report(saved, out)
@@ -265,7 +272,8 @@ def _repair_impl(cfg, res, saved, out, *, persist, connect, blink, on_prompt,
         "searching the network for the TV...")
     new_ip = None
     try:
-        new_ip = discovery.locate_tv(cfg.device.mac, timeout=discover_timeout, log=out)
+        new_ip = discovery.locate_tv(cfg.device.mac, timeout=discover_timeout,
+                                     log=out, allow_guess=allow_guess)
     except Exception as exc:  # noqa: BLE001 - discovery is best-effort
         out(f"Network search failed: {exc}")
     if new_ip and _host(new_ip) != saved:
