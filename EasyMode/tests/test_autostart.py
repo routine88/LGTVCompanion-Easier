@@ -59,16 +59,17 @@ def test_task_method_creates_logon_task(tmp_path, monkeypatch):
     label = autostart._enable_task()
     assert "Scheduled Task" in label
 
-    # The wrapper .cmd the task points at must exist and run the daemon.
-    wrapper = autostart._task_wrapper_path()
-    assert wrapper.exists()
-    assert "lgtv_easy run" in wrapper.read_text(encoding="utf-8")
-
-    # schtasks was asked to create a logon-triggered task.
+    # schtasks was asked to create a logon-triggered task...
     create = [c for c in calls if "/Create" in c]
     assert create, "schtasks /Create should have been called"
     assert "ONLOGON" in create[0]
     assert autostart.TASK_NAME in create[0]
+
+    # ...that runs the app itself. It used to run `cmd /c <wrapper.cmd>`, which
+    # threw a console window on screen at every login.
+    run = create[0][create[0].index("/TR") + 1]
+    assert "lgtv_easy run" in run or run.endswith(" run")
+    assert "cmd" not in run.split()[0].lower()
 
 
 def test_task_create_args_quotes_the_path():
@@ -145,9 +146,44 @@ def test_frozen_login_entry_runs_the_exe_not_the_module(tmp_path, monkeypatch):
 
 def test_frozen_shutdown_hook_runs_the_exe(tmp_path, monkeypatch):
     exe = _pretend_frozen(monkeypatch, tmp_path)
-    body = autostart._shutdown_wrapper_content()
-    assert f'"{exe}" off --only-if-configured' in body
-    assert "-m lgtv_easy" not in body
+    xml = autostart._shutdown_task_xml()
+    assert f"<Command>{exe}</Command>" in xml
+    assert "<Arguments>off --only-if-configured</Arguments>" in xml
+    assert "-m lgtv_easy" not in xml
+
+
+def test_the_shutdown_task_does_not_go_through_cmd():
+    """It fired `cmd /c <wrapper.cmd>`, so every shutdown flashed up a console
+    window on its way out."""
+    xml = autostart._shutdown_task_xml()
+    assert "<Command>cmd</Command>" not in xml
+    assert "/c " not in xml
+
+
+def test_the_login_entry_is_a_shortcut_not_a_batch_file(tmp_path, monkeypatch):
+    """cmd.exe in the Startup folder means a black window at every login, for a
+    program whose whole job is to be invisible."""
+    monkeypatch.setenv("LGTV_EASY_AUTOSTART_SANDBOX", str(tmp_path))
+    assert autostart._startup_link().suffix == ".lnk"
+    assert autostart._startup_link().parent == autostart._startup_target().parent
+
+
+@pytest.mark.skipif(os.name != "nt", reason="shortcuts are a Windows thing")
+def test_enable_writes_a_working_shortcut_and_drops_the_old_cmd(tmp_path,
+                                                                monkeypatch):
+    monkeypatch.setenv("LGTV_EASY_AUTOSTART_SANDBOX", str(tmp_path))
+    legacy = autostart._startup_target()        # an install from the .cmd era
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("@echo off\r\n", encoding="utf-8")
+
+    autostart.enable()
+
+    link = autostart._startup_link()
+    assert link.exists() and link.stat().st_size > 0, "no login shortcut written"
+    assert not legacy.exists(), "the old .cmd would start a second watcher"
+    assert autostart.is_enabled() is True
+    assert autostart.disable() is True
+    assert not link.exists()
 
 
 @linux_only

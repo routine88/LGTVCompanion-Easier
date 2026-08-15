@@ -65,16 +65,37 @@ def _sandbox() -> str:
 
 
 # ----- Windows: Startup folder ------------------------------------------------
-def _startup_target() -> Path:
+def _startup_dir() -> Path:
     sandbox = _sandbox()
     if sandbox:
-        return Path(sandbox) / "Startup" / "LGTV-Easy-Mode.cmd"
+        return Path(sandbox) / "Startup"
     base = os.environ.get("APPDATA") or str(Path.home())
     return (Path(base) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
-            / "Startup" / "LGTV-Easy-Mode.cmd")
+            / "Startup")
+
+
+def _startup_link() -> Path:
+    """The shortcut we prefer to register: Windows runs it with no console.
+
+    A .cmd in the Startup folder means cmd.exe, and cmd.exe means a black
+    window flashing up in the user's face at every single login - for a program
+    whose entire purpose is to sit quietly in the background. A shortcut runs
+    the executable directly, so nothing appears at all.
+    """
+    return _startup_dir() / f"{FRIENDLY}.lnk"
+
+
+def _startup_target() -> Path:
+    """The older .cmd form. Still written when a shortcut can't be created, and
+    always removed on disable so an upgrade never leaves two entries behind."""
+    return _startup_dir() / "LGTV-Easy-Mode.cmd"
 
 
 def _windows_run_cmd_content() -> str:
+    """The fallback login script. ``start ""`` hands off and lets cmd.exe close
+    immediately, so the console it opens is a flash rather than a window that
+    sits there - but a flash is still a flash, which is why the shortcut above
+    is tried first."""
     return (
         "@echo off\r\n"
         f'cd /d "{_app_dir()}"\r\n'
@@ -82,11 +103,23 @@ def _windows_run_cmd_content() -> str:
     )
 
 
+def _write_startup_shortcut() -> Path:
+    """Put a login shortcut in the Startup folder. Raises if it can't."""
+    from .winshortcut import create_shortcut
+    argv = _command("run")
+    link = _startup_link()
+    link.parent.mkdir(parents=True, exist_ok=True)
+    create_shortcut(link, argv[0], arguments=_join(argv[1:]),
+                    working_dir=_app_dir(), icon=branding.ico_path(),
+                    description=f"{FRIENDLY} - watch for idle and sleep the TV",
+                    app_id=branding.APP_ID)
+    return link
+
+
 # ----- Windows: Scheduled Task ------------------------------------------------
-def _task_wrapper_path() -> Path:
-    """A stable .cmd the scheduled task points at (kept beside the config)."""
-    from .config import config_dir
-    return Path(config_dir()) / "autostart-run.cmd"
+# Both tasks run the application directly. They used to run `cmd /c <wrapper>`,
+# which put a console window on screen every time they fired - at login for one,
+# and mid-shutdown for the other.
 
 
 def _run(args) -> "tuple[int, str]":
@@ -103,10 +136,21 @@ def _run(args) -> "tuple[int, str]":
         return 1, str(exc)
 
 
-def _task_create_args(wrapper: Path) -> list:
-    # The /TR value is the command to run; quote the path for spaces.
+def _task_create_args(command=None) -> list:
+    """schtasks arguments for the logon task.
+
+    ``/TR`` takes a whole command line, so the executable is quoted for spaces
+    and its arguments follow outside the quotes. ``command`` defaults to the
+    app's own "run" invocation; it is a parameter so tests can pass a path.
+    """
+    if command is None:
+        argv = _command("run")
+    elif isinstance(command, (str, os.PathLike)):
+        argv = [str(command)]                   # a bare path
+    else:
+        argv = [str(part) for part in command]
     return ["schtasks", "/Create", "/TN", TASK_NAME,
-            "/TR", f'"{wrapper}"', "/SC", "ONLOGON", "/F"]
+            "/TR", _join(argv), "/SC", "ONLOGON", "/F"]
 
 
 def _task_exists() -> bool:
@@ -117,10 +161,7 @@ def _task_exists() -> bool:
 
 
 def _enable_task() -> str:
-    wrapper = _task_wrapper_path()
-    wrapper.parent.mkdir(parents=True, exist_ok=True)
-    wrapper.write_text(_windows_run_cmd_content(), encoding="utf-8")
-    rc, out = _run(_task_create_args(wrapper))
+    rc, out = _run(_task_create_args())
     if rc != 0:
         raise OSError(f"schtasks could not create the task: {out.strip()}")
     return f"Scheduled Task '{TASK_NAME}'"
@@ -131,10 +172,6 @@ def _disable_task() -> bool:
     if _task_exists():
         rc, _ = _run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"])
         removed = rc == 0
-    try:
-        _task_wrapper_path().unlink()
-    except OSError:
-        pass
     return removed
 
 
@@ -142,20 +179,13 @@ def _disable_task() -> bool:
 SHUTDOWN_TASK_NAME = "LGTV Companion Easy Mode Shutdown"
 
 
-def _shutdown_wrapper_path():
-    from .config import config_dir
-    return Path(config_dir()) / "shutdown-off.cmd"
+def _xml_escape(text: str) -> str:
+    return (text.replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
 
 
-def _shutdown_wrapper_content() -> str:
-    return (
-        "@echo off\r\n"
-        f'cd /d "{_app_dir()}"\r\n'
-        f'{_join(_command("off", "--only-if-configured"))}\r\n'
-    )
-
-
-def _shutdown_task_xml(wrapper: Path) -> str:
+def _shutdown_task_xml() -> str:
+    argv = _command("off", "--only-if-configured")
     # Trigger on System-log event 1074 (User32) = a shutdown/restart/logoff was
     # initiated - early enough that the network is still up to reach the TV.
     sub = ("&lt;QueryList&gt;&lt;Query Id=\"0\" Path=\"System\"&gt;"
@@ -173,8 +203,12 @@ def _shutdown_task_xml(wrapper: Path) -> str:
         '<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>'
         '<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>'
         '<ExecutionTimeLimit>PT30S</ExecutionTimeLimit><Enabled>true</Enabled></Settings>\r\n'
-        '  <Actions Context="Author"><Exec><Command>cmd</Command>'
-        f'<Arguments>/c "{wrapper}"</Arguments></Exec></Actions>\r\n'
+        # Run the app itself. Going through `cmd /c <wrapper.cmd>` put a console
+        # window on screen every time the PC shut down.
+        f'  <Actions Context="Author"><Exec><Command>{_xml_escape(argv[0])}</Command>'
+        f'<Arguments>{_xml_escape(_join(argv[1:]))}</Arguments>'
+        f'<WorkingDirectory>{_xml_escape(_app_dir())}</WorkingDirectory>'
+        '</Exec></Actions>\r\n'
         '</Task>\r\n'
     )
 
@@ -188,13 +222,10 @@ def enable_shutdown_hook() -> str:
     if os.name != "nt":
         return "handled by the daemon (SIGTERM)"
     import tempfile
-    wrapper = _shutdown_wrapper_path()
-    wrapper.parent.mkdir(parents=True, exist_ok=True)
-    wrapper.write_text(_shutdown_wrapper_content(), encoding="utf-8")
     fd, xml_path = tempfile.mkstemp(suffix=".xml")
     os.close(fd)
     try:
-        Path(xml_path).write_text(_shutdown_task_xml(wrapper), encoding="utf-16")
+        Path(xml_path).write_text(_shutdown_task_xml(), encoding="utf-16")
         rc, out = _run(["schtasks", "/Create", "/TN", SHUTDOWN_TASK_NAME,
                         "/XML", xml_path, "/F"])
         if rc != 0:
@@ -211,10 +242,14 @@ def disable_shutdown_hook() -> None:
     if os.name != "nt":
         return
     _run(["schtasks", "/Delete", "/TN", SHUTDOWN_TASK_NAME, "/F"])
-    try:
-        _shutdown_wrapper_path().unlink()
-    except OSError:
-        pass
+    # Older versions drove the task through a .cmd next to the config; clear it
+    # so an upgraded install doesn't leave litter behind.
+    for legacy in ("shutdown-off.cmd", "autostart-run.cmd"):
+        try:
+            from .config import config_dir
+            (Path(config_dir()) / legacy).unlink()
+        except OSError:
+            pass
 
 
 # ----- Linux: autostart .desktop ----------------------------------------------
@@ -248,7 +283,8 @@ def is_enabled() -> bool:
     """True if auto-start is active by *any* supported method."""
     try:
         if os.name == "nt":
-            return _startup_target().exists() or _task_exists()
+            return (_startup_link().exists() or _startup_target().exists()
+                    or _task_exists())
         return _linux_target().exists()
     except OSError:
         return False
@@ -269,6 +305,14 @@ def enable(method: str = "") -> str:
         _try_enable_shutdown_hook()
         if method == "task":
             return _enable_task()
+        # A shortcut runs the app directly, so nothing flashes on screen at
+        # login. Only if that fails do we fall back to the .cmd, which does.
+        try:
+            link = _write_startup_shortcut()
+            _remove(_startup_target())      # drop the old form on upgrade
+            return f"Startup folder ({link})"
+        except Exception:  # noqa: BLE001 - no COM, an odd profile, a locked dir
+            pass
         path = _startup_target()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(_windows_run_cmd_content(), encoding="utf-8")
@@ -279,16 +323,24 @@ def enable(method: str = "") -> str:
     return f"autostart entry ({path})"
 
 
+def _remove(path: Path) -> bool:
+    try:
+        if path.exists():
+            path.unlink()
+            return True
+    except OSError:
+        pass
+    return False
+
+
 def disable() -> bool:
     """Remove the auto-start entry/entries. Returns True if anything was removed."""
     removed = False
     if os.name == "nt":
-        try:
-            if _startup_target().exists():
-                _startup_target().unlink()
-                removed = True
-        except OSError:
-            pass
+        # Both forms: an install upgraded from the .cmd era has the shortcut,
+        # and leaving the other behind would start the watcher twice.
+        for path in (_startup_link(), _startup_target()):
+            removed = _remove(path) or removed
         if _disable_task():
             removed = True
         disable_shutdown_hook()
@@ -324,8 +376,10 @@ def status() -> str:
         return "disabled"
     if os.name == "nt":
         how = []
-        if _startup_target().exists():
+        if _startup_link().exists():
             how.append("Startup folder")
+        if _startup_target().exists():
+            how.append("Startup folder (.cmd)")
         if _task_exists():
             how.append("Scheduled Task")
         return "enabled (" + ", ".join(how) + ")"

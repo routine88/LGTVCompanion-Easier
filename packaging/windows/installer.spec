@@ -48,10 +48,10 @@ datas.append((str(version_txt), "."))
 
 a = Analysis(
     [str(HERE / "installer.py")],
-    pathex=[str(HERE)],            # so `import shortcuts` resolves
+    pathex=[str(HERE), str(REPO / "EasyMode")],   # for lgtv_easy.winshortcut
     binaries=[],
     datas=datas,
-    hiddenimports=["shortcuts"],
+    hiddenimports=["lgtv_easy.winshortcut"],
     excludes=["numpy", "PIL", "pytest", "setuptools", "pip", "pkg_resources"],
     noarchive=False,
 )

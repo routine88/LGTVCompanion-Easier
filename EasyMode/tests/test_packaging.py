@@ -31,13 +31,25 @@ def read(*parts):
 # ----- everything a build needs is committed ---------------------------------
 def test_the_packaging_files_exist():
     for name in ("app.spec", "app_entry.py", "installer.spec", "installer.py",
-                 "shortcuts.py", "build.ps1"):
+                 "build.ps1"):
         assert os.path.exists(os.path.join(WIN, name)), f"missing windows/{name}"
+    # The shortcut writer lives in the package: the installer uses it for the
+    # Start Menu and desktop icons, and autostart uses it for the login entry.
+    assert os.path.exists(os.path.join(REPO, "EasyMode", "lgtv_easy",
+                                       "winshortcut.py"))
     for name in ("install.sh", "uninstall.sh"):
         assert os.path.exists(os.path.join(LINUX, name)), f"missing linux/{name}"
 
 
 # ----- Windows ---------------------------------------------------------------
+def test_the_installer_uses_the_packaged_shortcut_writer():
+    installer = read(WIN, "installer.py")
+    assert "from lgtv_easy import winshortcut as shortcuts" in installer
+    spec = read(WIN, "installer.spec")
+    assert "lgtv_easy.winshortcut" in spec, (
+        "the frozen installer must bundle the module it imports")
+
+
 def test_the_installer_stamps_the_apps_own_app_id():
     """Shortcut AppUserModelID vs the one the app declares at startup. When
     these disagree, pinning the app to the taskbar produces a second, dead

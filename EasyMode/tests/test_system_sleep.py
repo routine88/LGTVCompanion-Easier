@@ -186,3 +186,15 @@ def test_null_watcher_is_a_safe_noop():
     w.start()
     w.stop()  # must not raise
     assert w.backend_name == "none"
+
+
+def test_windows_notify_flag_is_callback_not_window_handle():
+    """Regression: the flag that decides whether Windows accepts us at all.
+
+    A plain constant check, so it runs on every platform. It was 0
+    (DEVICE_NOTIFY_WINDOW_HANDLE), under which Windows reads the callback struct
+    as a window handle and refuses the registration with ERROR_INVALID_PARAMETER
+    - so the TV silently never followed the PC into sleep. Confirmed against the
+    real API: flags=0 returns 87, flags=2 registers.
+    """
+    assert system_sleep._WindowsWatcher._DEVICE_NOTIFY_CALLBACK == 2

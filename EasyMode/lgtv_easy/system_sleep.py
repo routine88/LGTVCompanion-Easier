@@ -55,7 +55,17 @@ class _WindowsWatcher:
     _PBT_APMSUSPEND = 0x0004
     _PBT_APMRESUMESUSPEND = 0x0007
     _PBT_APMRESUMEAUTOMATIC = 0x0012
-    _DEVICE_NOTIFY_CALLBACK = 0
+    # Flags for PowerRegisterSuspendResumeNotification (winuser.h). It must be 2:
+    # that is what tells Windows the Recipient is a callback struct.
+    #   DEVICE_NOTIFY_WINDOW_HANDLE  = 0
+    #   DEVICE_NOTIFY_SERVICE_HANDLE = 1
+    #   DEVICE_NOTIFY_CALLBACK       = 2
+    # This was 0, which is not a "default" - it declares the Recipient to be an
+    # HWND. Windows then reads our struct pointer as a window handle, rejects it
+    # with ERROR_INVALID_PARAMETER (87), and the registration never happens. The
+    # TV therefore never followed the PC into sleep on Windows, and because the
+    # failure was logged at debug level nobody saw why.
+    _DEVICE_NOTIFY_CALLBACK = 2
 
     def __init__(self, on_sleep, on_resume, logger):
         self._on_sleep = on_sleep

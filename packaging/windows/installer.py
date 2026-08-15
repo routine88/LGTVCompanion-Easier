@@ -35,7 +35,7 @@ import time
 import winreg
 from pathlib import Path
 
-import shortcuts
+from lgtv_easy import winshortcut as shortcuts
 
 APP_NAME = "LGTV Companion Easy Mode"
 GUI_EXE = "LGTV Companion Easy Mode.exe"
@@ -151,8 +151,12 @@ def autostart_registered() -> bool:
     supports (the Startup folder entry, or the Scheduled Task it falls back to
     where policy blocks that folder)."""
     base = os.environ.get("APPDATA")
-    if base and (Path(base) / "Microsoft" / "Windows" / "Start Menu" /
-                 "Programs" / "Startup" / "LGTV-Easy-Mode.cmd").exists():
+    startup = (Path(base) / "Microsoft" / "Windows" / "Start Menu" /
+               "Programs" / "Startup") if base else None
+    # Either form counts: the shortcut written now, or the .cmd older versions
+    # left behind.
+    if startup and (any((startup / n).exists() for n in
+                        (f"{APP_NAME}.lnk", "LGTV-Easy-Mode.cmd"))):
         return True
     return run_quiet(["schtasks", "/Query", "/TN", APP_NAME], timeout=20) == 0
 
