@@ -7,7 +7,10 @@ name: Windows installer
 on:
   workflow_dispatch:
   push:
-    tags: ["v*"]
+    # Easy Mode has its own version line, deliberately namespaced: this is a
+    # fork of a project whose own releases are tagged v5.x, and a bare "v1.0.0"
+    # sitting among those would read as an ancient build of the wrong app.
+    tags: ["easy-mode-v*"]
 
 jobs:
   build:
@@ -58,7 +61,7 @@ jobs:
 
       # On a version tag, the installer becomes a downloadable release asset.
       - name: Attach to the release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/easy-mode-v')
         uses: softprops/action-gh-release@v2
         with:
           files: packaging/windows/dist/LGTVCompanionEasyMode-Setup.exe
