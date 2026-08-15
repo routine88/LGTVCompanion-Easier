@@ -29,6 +29,30 @@ def _alive(pid: int) -> bool:
 
             kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            SYNCHRONIZE = 0x00100000
+            WAIT_OBJECT_0 = 0x0
+            handle = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid)
+            if handle:
+                try:
+                    # Windows' answer to a zombie: TerminateProcess has already
+                    # run, but the process object outlives it for as long as
+                    # anyone still holds a handle - a parent that hasn't reaped
+                    # it, or the supervisor that started it - and OpenProcess
+                    # goes on succeeding the whole time. Waiting on the object
+                    # is the question that gets a straight answer: it is
+                    # signalled once the process has really exited.
+                    #
+                    # Without this, stop_holder killed the watcher, saw it as
+                    # still alive, and left the pidfile behind - so the app went
+                    # on reporting a background watcher that no longer existed,
+                    # forever.
+                    return kernel32.WaitForSingleObject(handle, 0) != WAIT_OBJECT_0
+                finally:
+                    kernel32.CloseHandle(handle)
+            # No SYNCHRONIZE rights (a process owned by somebody else): fall
+            # back to asking only whether it exists. "Cannot tell" must read as
+            # alive, or we would clear a lock that is genuinely held.
             handle = kernel32.OpenProcess(
                 PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
             if handle:

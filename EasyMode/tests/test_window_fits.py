@@ -122,7 +122,18 @@ def test_scrolling_reaches_the_bottom_of_the_panel(app):
 
 # ----- and it stays out of the way when there is room -------------------
 def test_a_roomy_screen_gets_no_scrollbar(app):
+    """Given room for everything, the scrollbar stays out of the way.
+
+    Skipped on a genuinely small display. Pretending the screen is 1200px tall
+    does not make it so: the window manager still clamps the window to the real
+    desktop, so on a 768px CI runner the viewport is short whatever we claim and
+    the bar is right to appear.
+    """
+    from lgtv_easy import gui
+    real_height = gui.usable_screen(app)[1]        # before fit_to patches it
     fit_to(app, ROOMY_SCREEN)
+    if app.scroll.inner.winfo_reqheight() > real_height:
+        pytest.skip(f"display is only {real_height}px tall; the panel cannot fit")
     assert not app.scroll._bar_shown, "scrollbar shown when everything fits"
 
 
