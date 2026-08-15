@@ -15,7 +15,9 @@ INSTALL IT
             your account only, so it never asks for an administrator, and it
             uninstalls from Settings -> Apps like any other program.
 
-            No Setup.exe in this folder? Build one - see BUILDING below.
+            No Setup.exe next to this file? Download the latest from
+              https://github.com/routine88/LGTVCompanion-Easier/releases
+            or build one yourself - see BUILDING below.
 
   Linux   : open a terminal in this folder and run
                 sh packaging/linux/install.sh
