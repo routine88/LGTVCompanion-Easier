@@ -27,6 +27,11 @@ lgtv-easy-gui = "lgtv_easy.gui:main"
 [tool.setuptools]
 packages = ["lgtv_easy"]
 
+# The icons ship inside the package so the app finds them the same way however
+# it was installed - from source, with pip, or frozen into an .exe.
+[tool.setuptools.package-data]
+lgtv_easy = ["assets/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

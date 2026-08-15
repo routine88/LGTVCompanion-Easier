@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 from pathlib import Path
+
+from . import branding
 
 APP_ID = "lgtv-companion-easy"
 FRIENDLY = "LGTV Companion Easy Mode"
@@ -27,15 +28,26 @@ TASK_NAME = "LGTV Companion Easy Mode"
 
 
 def _app_dir() -> str:
-    """Directory containing the ``lgtv_easy`` package (so ``-m lgtv_easy`` works)."""
-    return str(Path(__file__).resolve().parents[1])
+    """Working directory for a login start: the folder holding the ``lgtv_easy``
+    package (so ``-m lgtv_easy`` resolves), or the installed .exe's own folder
+    when this is a frozen build."""
+    return str(branding.app_dir())
 
 
-def _pythonw() -> str:
-    """Prefer pythonw.exe on Windows so no console window flashes at login."""
-    exe = Path(sys.executable) if sys.executable else Path("python")
-    candidate = exe.with_name("pythonw.exe")
-    return str(candidate if candidate.exists() else exe)
+def _command(*args: str) -> "list[str]":
+    """argv that starts Easy Mode with ``args``, windowless.
+
+    An installed .exe and a source checkout need completely different argv - the
+    frozen app would read ``-m lgtv_easy`` as two junk arguments and refuse to
+    start - so every entry written here is built from the one helper that knows
+    the difference.
+    """
+    return branding.launch_command(*args, windowed=True)
+
+
+def _join(argv) -> str:
+    """Render argv as a command line, quoting the parts that need it."""
+    return " ".join(f'"{a}"' if (" " in a or not a) else a for a in argv)
 
 
 # ----- Windows: Startup folder ------------------------------------------------
@@ -49,7 +61,7 @@ def _windows_run_cmd_content() -> str:
     return (
         "@echo off\r\n"
         f'cd /d "{_app_dir()}"\r\n'
-        f'start "" "{_pythonw()}" -m lgtv_easy run\r\n'
+        f'start "" {_join(_command("run"))}\r\n'
     )
 
 
@@ -116,7 +128,7 @@ def _shutdown_wrapper_content() -> str:
     return (
         "@echo off\r\n"
         f'cd /d "{_app_dir()}"\r\n'
-        f'"{_pythonw()}" -m lgtv_easy off --only-if-configured\r\n'
+        f'{_join(_command("off", "--only-if-configured"))}\r\n'
     )
 
 
@@ -189,12 +201,15 @@ def _linux_target() -> Path:
 
 
 def _linux_desktop_content() -> str:
-    py = sys.executable or "python3"
+    inner = " ".join(f'"{a}"' if " " in a else a for a in _command("run"))
+    icon = branding.icon_png()
     return (
         "[Desktop Entry]\n"
         "Type=Application\n"
         f"Name={FRIENDLY}\n"
-        f"Exec=sh -c 'cd \"{_app_dir()}\" && \"{py}\" -m lgtv_easy run'\n"
+        "Comment=Sleep the TV screen when this PC is idle\n"
+        f"Exec=sh -c 'cd \"{_app_dir()}\" && {inner}'\n"
+        + (f"Icon={icon}\n" if icon else "") +
         "Terminal=false\n"
         "X-GNOME-Autostart-enabled=true\n"
     )

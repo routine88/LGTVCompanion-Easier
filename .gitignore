@@ -9,6 +9,10 @@ dist/
 venv/
 env/
 
+# Packaging: the throwaway venv build.ps1 puts PyInstaller in (its build/ and
+# dist/ output is already covered above)
+.build-venv/
+
 # Test / tooling caches
 .pytest_cache/
 .mypy_cache/
