@@ -143,9 +143,19 @@ class Daemon:
         return WebOSClient(self.config.device.ip, secure=self.config.device.secure)
 
     def _default_locator(self, mac: str) -> Optional[str]:
+        """Find the TV again after it moved - but only the TV we paired with.
+
+        allow_guess=False: with no MAC to match on, the fallback is to adopt the
+        one LG TV that answers, and adopting means registering with it. A TV that
+        doesn't recognise the registration asks its owner, on screen. The watcher
+        runs unattended for weeks, so it must never be the thing that interrupts
+        somebody's film to ask a question nobody is there to answer. A person
+        using the app ('Test my TV', `lgtv-easy repair`) still gets the fallback.
+        """
         from .discovery import locate_tv
         return locate_tv(
-            mac, log=lambda m: self.logger.debug("relocate: %s", m))
+            mac, allow_guess=False,
+            log=lambda m: self.logger.debug("relocate: %s", m))
 
     def _ensure_client(self, force: bool = False) -> Optional[WebOSClient]:
         if self._client and self._client.connected:

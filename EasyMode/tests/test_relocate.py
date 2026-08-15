@@ -195,7 +195,7 @@ def test_daemon_relocates_without_a_stored_mac(tmp_path, monkeypatch):
 
 def test_locate_tv_uses_mac_when_known(monkeypatch):
     monkeypatch.setattr(discovery, "locate_by_mac",
-                        lambda mac, timeout=3.0, log=None: "192.168.86.5")
+                        lambda mac, timeout=3.0, log=None, allow_guess=True: "192.168.86.5")
     assert discovery.locate_tv("B8:16:5F:72:64:C6") == "192.168.86.5"
 
 
@@ -317,7 +317,7 @@ def test_connect_tv_relocates_when_ip_moved(tmp_path, monkeypatch):
     monkeypatch.setattr(recovery, "WebOSClient", _FakeClient)
     monkeypatch.setattr(recovery, "pair_with_fallback", fake_pair)
     monkeypatch.setattr(discovery, "locate_tv",
-                        lambda mac, timeout=3.0, log=None: "127.0.0.1")
+                        lambda mac, timeout=3.0, log=None, allow_guess=True: "127.0.0.1")
 
     client = recovery.connect_tv(cfg)
     assert isinstance(client, _FakeClient) and client.ip == "127.0.0.1"

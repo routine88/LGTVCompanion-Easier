@@ -1408,9 +1408,15 @@ class SettingsPanel(ttk.Frame):
         """On startup, quietly verify the TV is reachable and self-heal if not.
 
         A fast TCP health check decides whether anything is wrong; only if it is
-        do we run a background repair (relocate by MAC/discovery and persist the
-        corrected address - no screen blink, so it's invisible when all is well).
+        do we run a background repair (relocate by MAC and persist the corrected
+        address - no screen blink, so it's invisible when all is well).
         Gated by LGTV_EASY_NO_SELFTEST so tests and headless CI stay hermetic.
+
+        This one runs on its own the moment the window opens, so it relocates by
+        MAC only (allow_guess=False). Adopting an unidentified TV would put a
+        pairing prompt on whatever screen it picked, and nobody asked for
+        anything yet - they only opened the settings window. The "Test my TV"
+        button, which is a request, keeps the wider search.
         """
         import os
         if os.environ.get("LGTV_EASY_NO_SELFTEST") == "1":
@@ -1425,7 +1431,8 @@ class SettingsPanel(ttk.Frame):
                 if selfheal.quick_health_check(cfg):
                     self.app.post(self._refresh_status)
                     return
-                res = selfheal.repair(cfg, connect=False, blink=False)
+                res = selfheal.repair(cfg, connect=False, blink=False,
+                                      allow_guess=False)
             except Exception:  # noqa: BLE001 - a self-test must never crash the app
                 return
             self.app.post(lambda: self._selftest_done(res))
