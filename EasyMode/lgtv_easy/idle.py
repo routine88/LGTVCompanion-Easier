@@ -17,11 +17,12 @@ import ctypes
 import os
 import re
 import shutil
-import subprocess
 import sys
 import time
+from subprocess import DEVNULL
 
 from . import _dbus
+from . import proc
 
 _BACKEND = None  # cached ("name", callable)
 _GDBUS_PATH = None  # cached gdbus resolution (False once known-absent)
@@ -54,7 +55,7 @@ def _xprintidle_backend():
 
     def _get() -> float:
         try:
-            out = subprocess.check_output([path], timeout=2)
+            out = proc.check_output([path], timeout=2)
             return max(0.0, int(out.strip()) / 1000.0)
         except Exception:
             return 0.0
@@ -108,10 +109,10 @@ def _gdbus_call(dest: str, path: str, method: str) -> "str | None":
     if not gdbus:
         return None
     try:
-        return subprocess.check_output(
+        return proc.check_output(
             [gdbus, "call", "--session", "--dest", dest,
              "--object-path", path, "--method", method],
-            stderr=subprocess.DEVNULL, timeout=2, text=True).strip()
+            stderr=DEVNULL, timeout=2, text=True).strip()
     except Exception:
         return None
 

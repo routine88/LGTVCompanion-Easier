@@ -33,8 +33,7 @@ def test_arp_table_parses_and_reverse_looks_up(monkeypatch):
         "192.168.86.1 dev eno1 lladdr a0:b1:c2:d3:e4:f5 STALE\n"
         "192.168.86.99 dev eno1  FAILED\n"          # incomplete: no MAC -> skipped
     )
-    monkeypatch.setattr(netdiag.subprocess, "run",
-                        lambda *a, **k: _Fake(sample))
+    monkeypatch.setattr(netdiag.proc, "run", lambda *a, **k: _Fake(sample))
     table = netdiag.arp_table()
     assert ("192.168.86.43", "B8:16:5F:72:64:C6") in table
     assert all("FAILED" not in ip for ip, _ in table)

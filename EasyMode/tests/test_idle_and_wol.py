@@ -96,7 +96,7 @@ def test_x11_session_uses_xprintidle(monkeypatch):
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     monkeypatch.setenv("DISPLAY", ":0")
     monkeypatch.setattr(idle_mod.shutil, "which", lambda name: "/usr/bin/xprintidle")
-    monkeypatch.setattr(idle_mod.subprocess, "check_output", lambda *a, **k: b"5000")
+    monkeypatch.setattr(idle_mod.proc, "check_output", lambda *a, **k: b"5000")
     name, getter = idle_mod._select_backend()
     assert name == "xprintidle"
     assert abs(getter() - 5.0) < 0.1

@@ -39,6 +39,7 @@ python3 -m lgtv_easy repair     # self-test the TV connection and auto-fix a mov
 | `config.py` | the tiny JSON settings file |
 | `autostart.py` | start-at-login registration |
 | `singleton.py` | one-watcher-at-a-time lock |
+| `proc.py` | starts every helper program windowless (no console flashing on Windows) |
 | `LGTV-Easy-Mode-WINDOWS.ps1` | the Windows launcher engine the root `.bat` runs |
 
 ## Tests

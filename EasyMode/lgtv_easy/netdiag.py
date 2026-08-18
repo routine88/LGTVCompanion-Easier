@@ -10,10 +10,11 @@ from __future__ import annotations
 import platform
 import re
 import socket
-import subprocess
 import sys
 import time
 from typing import List, Optional, Tuple
+
+from . import proc
 
 # WebOS control ports: plain WebSocket (3000) and TLS WebSocket (3001).
 WEBOS_PORTS = (3000, 3001)
@@ -191,8 +192,8 @@ def _arp_commands(ip: str) -> "list":
 def _arp_outputs(ip: str, timeout: float = 4.0):
     for cmd in _arp_commands(ip):
         try:
-            yield subprocess.run(cmd, capture_output=True, text=True,
-                                 timeout=timeout).stdout or ""
+            yield proc.run(cmd, capture_output=True, text=True,
+                           timeout=timeout).stdout or ""
         except Exception:  # noqa: BLE001 - tool missing, timeout, etc.
             continue
 
@@ -228,8 +229,8 @@ def arp_table(timeout: float = 4.0) -> "List[Tuple[str, str]]":
     seen = set()
     for cmd in _arp_dump_commands():
         try:
-            out = subprocess.run(cmd, capture_output=True, text=True,
-                                 timeout=timeout).stdout or ""
+            out = proc.run(cmd, capture_output=True, text=True,
+                           timeout=timeout).stdout or ""
         except Exception:  # noqa: BLE001 - tool missing, timeout, etc.
             continue
         # One ARP entry per line: an IP and the MAC it resolved to belong

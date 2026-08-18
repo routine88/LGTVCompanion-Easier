@@ -17,10 +17,10 @@ Everything here is best-effort and reports what it did; callers handle errors.
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
 
 from . import branding
+from . import proc
 
 APP_ID = "lgtv-companion-easy"
 FRIENDLY = "LGTV Companion Easy Mode"
@@ -130,8 +130,8 @@ def _run(args) -> "tuple[int, str]":
         # pretend machine the tests are running against.
         return 1, "schtasks not run (LGTV_EASY_AUTOSTART_SANDBOX is set)"
     try:
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=20)
-        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+        done = proc.run(args, capture_output=True, text=True, timeout=20)
+        return done.returncode, (done.stdout or "") + (done.stderr or "")
     except Exception as exc:  # noqa: BLE001 - tool missing, timeout, etc.
         return 1, str(exc)
 

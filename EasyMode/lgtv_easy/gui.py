@@ -543,13 +543,13 @@ def show_no_tv_alert(reason: str, dismiss_after: float = 300.0) -> None:
     body.pack(fill="both", expand=True)
 
     def open_setup():
-        import subprocess
+        from . import proc
         try:
             # branding.launch_command knows whether we are a frozen .exe or a
             # source checkout; the watcher that opened this window is neither
             # necessarily.
-            subprocess.Popen(branding.launch_command("gui"),
-                             cwd=str(branding.app_dir()))
+            proc.popen(branding.launch_command("gui"),
+                       cwd=str(branding.app_dir()))
         except Exception:  # noqa: BLE001 - nothing useful to do if it won't start
             pass
         root.destroy()

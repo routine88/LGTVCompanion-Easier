@@ -30,6 +30,8 @@ import sys
 import threading
 from typing import Callable, Optional
 
+from . import proc
+
 
 class _NullWatcher:
     """A watcher for systems where we can't observe suspend/resume."""
@@ -146,7 +148,7 @@ class _LogindWatcher:
         self._acquire_delay_lock()
         self._acquire_shutdown_lock()
         try:
-            self._mon = subprocess.Popen(
+            self._mon = proc.popen(
                 [self._gdbus, "monitor", "--system",
                  "--dest", "org.freedesktop.login1",
                  "--object-path", "/org/freedesktop/login1"],
@@ -169,7 +171,7 @@ class _LogindWatcher:
         if self._lock_proc is not None and self._lock_proc.poll() is None:
             return
         try:
-            self._lock_proc = subprocess.Popen(
+            self._lock_proc = proc.popen(
                 [self._inhibit, "--what=sleep", "--mode=delay",
                  "--who=LGTV Companion Easy Mode",
                  "--why=Turn the TV screen off before the PC sleeps",
@@ -179,10 +181,10 @@ class _LogindWatcher:
             self._lock_proc = None
 
     def _release_delay_lock(self) -> None:
-        proc, self._lock_proc = self._lock_proc, None
-        if proc is not None and proc.poll() is None:
+        child, self._lock_proc = self._lock_proc, None
+        if child is not None and child.poll() is None:
             try:
-                proc.terminate()
+                child.terminate()
             except Exception:  # noqa: BLE001
                 pass
 
@@ -198,7 +200,7 @@ class _LogindWatcher:
         if self._shutdown_lock is not None and self._shutdown_lock.poll() is None:
             return
         try:
-            self._shutdown_lock = subprocess.Popen(
+            self._shutdown_lock = proc.popen(
                 [self._inhibit, "--what=shutdown", "--mode=delay",
                  "--who=LGTV Companion Easy Mode",
                  "--why=Power the TV off before the PC shuts down",
@@ -208,10 +210,10 @@ class _LogindWatcher:
             self._shutdown_lock = None
 
     def _release_shutdown_lock(self) -> None:
-        proc, self._shutdown_lock = self._shutdown_lock, None
-        if proc is not None and proc.poll() is None:
+        child, self._shutdown_lock = self._shutdown_lock, None
+        if child is not None and child.poll() is None:
             try:
-                proc.terminate()
+                child.terminate()
             except Exception:  # noqa: BLE001
                 pass
 
@@ -273,7 +275,7 @@ class _LogindWatcher:
 def _linux_logind_available(gdbus: str) -> bool:
     """True if logind answers on the system bus, so monitoring is worthwhile."""
     try:
-        res = subprocess.run(
+        res = proc.run(
             [gdbus, "call", "--system", "--dest", "org.freedesktop.login1",
              "--object-path", "/org/freedesktop/login1",
              "--method", "org.freedesktop.DBus.Peer.Ping"],
