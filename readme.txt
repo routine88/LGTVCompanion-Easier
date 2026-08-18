@@ -68,6 +68,18 @@ TO STOP THE BACKGROUND WATCHER
 
 TO UNINSTALL
 ------------
+  Windows : Double-click  "Windows Uninstall.bat"
+  Linux   : Open a terminal in this folder and run
+                sh "Linux Uninstall.sh"
+
+Both remove everything, whichever way you installed it: the installed copy, the
+self-updating copy the portable launcher downloads, the start-at-login entry,
+the shutdown task, and the shortcuts. Your settings are KEPT so a reinstall
+needs no setup - add --purge to delete those too.
+
+Prefer the built-in routes? They still work, they just only know about the copy
+they installed themselves:
+
   Windows : Settings -> Apps -> LGTV Companion Easy Mode -> Uninstall
   Linux   : sh packaging/linux/uninstall.sh          (add --purge to also
                                                       delete your settings)
@@ -83,11 +95,13 @@ separate "guest" network. The setup window warns you if they look different.
 
 WHAT'S IN THIS FOLDER
 ---------------------
-  Windows Launch.bat - the portable Windows launcher (double-click)
-  Linux Launch.sh    - the portable Linux launcher (right-click -> Run)
-  EasyMode/          - the app itself (and its Windows engine)
-  packaging/         - the installers, and how to build the Windows .exe
-  readme.txt         - this file
+  Windows Launch.bat    - the portable Windows launcher (double-click)
+  Linux Launch.sh       - the portable Linux launcher (right-click -> Run)
+  Windows Uninstall.bat - removes it all again, on Windows (double-click)
+  Linux Uninstall.sh    - removes it all again, on Linux
+  EasyMode/             - the app itself (and its Windows engine)
+  packaging/            - the installers, and how to build the Windows .exe
+  readme.txt            - this file
 
 
 BUILDING THE WINDOWS INSTALLER
