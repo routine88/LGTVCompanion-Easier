@@ -56,7 +56,10 @@ def test_helpers_still_run_a_real_command():
 
 def _direct_spawns(path: Path):
     """Every ``subprocess.<spawner>(...)`` call in one module."""
-    tree = ast.parse(path.read_text(), filename=str(path))
+    # encoding="utf-8" is not optional: Python defaults to the locale codec, and
+    # on a Windows runner that is cp1252, which cannot decode the arrow in the
+    # GUI's Back button. The sources are UTF-8 wherever this runs.
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     hits = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -83,6 +86,6 @@ def test_the_places_that_shell_out_use_the_helper():
     # A guard against the guard: if these ever stop shelling out, the test above
     # would pass vacuously and the protection would quietly be worth nothing.
     for name in ("netdiag.py", "autostart.py", "system_sleep.py"):
-        source = (PKG / name).read_text()
+        source = (PKG / name).read_text(encoding="utf-8")
         assert re.search(r"\bproc\.(run|popen|check_output)\(", source), \
             f"{name} no longer runs anything through lgtv_easy.proc"
