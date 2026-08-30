@@ -602,6 +602,7 @@ class App(tk.Tk):
         self._pump_id = self.after(100, self._pump)
 
         self._install_reload_signal()
+        self._install_process_signals()
         self._build_chrome()
         # Everything below the brand bar lives in a scrolling viewport, so no
         # card can ever end up drawn past the bottom of the screen.
@@ -632,6 +633,61 @@ class App(tk.Tk):
             signal.signal(signal.SIGHUP, _on_hup)
         except (ValueError, OSError):
             pass
+
+    def _install_process_signals(self):
+        """Give SIGTERM and SIGUSR1 the same handling cli.cmd_run's headless
+        daemon already gets, so a signal aimed at this window's process doesn't
+        fall through to Python's default action - terminate immediately - and
+        abandon whatever the daemon is holding. In particular, Daemon.stop() is
+        what releases the systemd-inhibit sleep/shutdown locks in
+        system_sleep.py; skipping it leaks them, and they go on blocking sleep
+        and shutdown until something kills them by hand.
+
+        * SIGUSR1 = a supervisor/updater/installer restarting us -> clean up,
+          don't touch the TV (mirrors on_restart in cli._install_shutdown_hooks).
+        * SIGTERM = the session is actually ending -> power the TV off too,
+          unless the daemon's own PrepareForShutdown hook already did it
+          (same ``_shutdown_handled`` guard cli.py's fallback uses).
+
+        POSIX only; harmless when we don't own the daemon.
+        """
+        import signal
+        state = {"terminating": False}
+
+        def _cleanup():
+            if self.daemon is not None:
+                self.daemon.stop()
+                self.daemon = None
+            if self._lock is not None:
+                self._lock.release()
+                self._lock = None
+
+        def _on_usr1(_signum=None, _frame=None):
+            _cleanup()
+            raise SystemExit(0)
+
+        def _on_term(_signum=None, _frame=None):
+            if state["terminating"]:  # a second SIGTERM arrived mid-power-off
+                return
+            state["terminating"] = True
+            if (self.cfg.tv_off_on_shutdown
+                    and not getattr(self.daemon, "_shutdown_handled", False)):
+                from .applog import get_logger
+                from .cli import _tv_power_off
+                _tv_power_off(self.cfg, log=get_logger().info, timeout=5.0,
+                              guard=True)
+            _cleanup()
+            raise SystemExit(0)
+
+        for name, handler in (("SIGUSR1", _on_usr1), ("SIGTERM", _on_term)):
+            sig = getattr(signal, name, None)
+            if sig is None:
+                continue
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):
+                pass
+
     def _build_chrome(self):
         """A persistent brand bar + accent rule across the top of the window."""
         bar = ttk.Frame(self, padding=(PAD + 4, 16, PAD + 4, 12))
