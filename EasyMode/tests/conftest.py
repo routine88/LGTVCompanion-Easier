@@ -11,6 +11,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 # Windows). The daemon checks this before starting its sleep watcher.
 os.environ.setdefault("LGTV_EASY_NO_SLEEP_WATCH", "1")
 
+# "Is anything playing on this PC?" must not be answered by the developer's own
+# desktop. The daemon holds the screen on while something plays, so a browser
+# tab with a video in it - on the machine running the suite - would otherwise
+# stop every idle test from ever blanking, and the suite would pass or fail
+# depending on what the person at the keyboard happened to be watching. Pin it
+# to "nothing playing"; the tests that exercise the hold inject their own.
+os.environ.setdefault("LGTV_EASY_FAKE_MEDIA", "0")
+
 # Likewise, keep the GUI's startup connection self-test from firing real network
 # probes/discovery when a settings panel is built in a test; scenarios that want
 # it exercise selfheal/the repair dialog explicitly.

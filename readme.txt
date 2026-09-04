@@ -39,6 +39,12 @@ first run walks through 3 steps:
 After setup it keeps your TV sleeping in the background. Closing the window does
 NOT stop it. (No graphical desktop? The same steps run as a text wizard.)
 
+It also knows the difference between an empty desk and a film. While a video is
+playing - in a browser or in a media player - the screen-off and power-off
+timers are held, and start again from the moment playback stops. Switch that off
+with "Not while something is playing" in the settings window if you would rather
+the timeout always won.
+
 
 OR RUN IT WITHOUT INSTALLING
 ----------------------------

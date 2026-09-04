@@ -29,6 +29,7 @@ python3 -m lgtv_easy repair     # self-test the TV connection and auto-fix a mov
 | `wizard_text.py` | the text-mode wizard (fallback when there's no display) |
 | `daemon.py` | the idle-watching loop that blanks/wakes the TV |
 | `idle.py` | cross-platform "seconds since last input" detection |
+| `media.py` | cross-platform "is anything playing right now?" detection, so the TV never goes dark mid-film |
 | `system_sleep.py` | detect whole-PC suspend/resume so the TV follows it to sleep |
 | `webos.py` / `_ws.py` | the WebOS WebSocket protocol + pairing |
 | `discovery.py` | finding TVs on the network (SSDP) |

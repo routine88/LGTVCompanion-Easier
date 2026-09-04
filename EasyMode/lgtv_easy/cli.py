@@ -244,6 +244,9 @@ def cmd_set(args) -> int:
     if args.only_my_input is not None:
         cfg.only_my_input = args.only_my_input
         changed.append(f"only_my_input={args.only_my_input}")
+    if args.stay_on_while_playing is not None:
+        cfg.stay_on_while_playing = args.stay_on_while_playing
+        changed.append(f"stay_on_while_playing={args.stay_on_while_playing}")
     if args.input is not None:
         # 'auto' clears the pin and lets the daemon learn it from the TV again.
         value = "" if args.input.strip().lower() in ("auto", "") else \
@@ -301,6 +304,19 @@ def cmd_status(args) -> int:
     else:
         _print("  This PC's in: (not checked - Easy Mode acts whatever the TV "
                "is showing)")
+    if cfg.stay_on_while_playing:
+        from . import media as media_mod
+        if media_mod.is_available():
+            now = media_mod.playing_detail() if media_mod.is_playing() else ""
+            state = f"playing now: {now}" if now else "nothing playing now"
+            _print("  Media hold  : ON - the TV stays on while something is "
+                   f"playing (via {media_mod.backend_name()}; {state})")
+        else:
+            _print("  Media hold  : ON, but nothing on this system reports "
+                   "playback - the sleep timer will not be held back")
+    else:
+        _print("  Media hold  : OFF - the TV sleeps on the idle timeout even "
+               "mid-video")
     _print(f"  Idle backend: {idle_mod.idle_backend_name()} "
            f"(real={idle_mod.is_real_backend()})")
     if not idle_mod.is_real_backend():
@@ -732,6 +748,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--sleep-with-pc", dest="sleep_with_pc", type=_boolish,
                    help="screen off when the PC sleeps, back on at resume (true/false)")
     s.add_argument("--mac", help="set Wake-on-LAN MAC address")
+    s.add_argument("--stay-on-while-playing", dest="stay_on_while_playing",
+                   type=_boolish,
+                   help="hold the sleep and power-off timers while a video or "
+                        "other media is playing on this PC (true/false)")
     s.add_argument("--only-my-input", dest="only_my_input", type=_boolish,
                    help="only touch the TV while it is showing this PC, so a "
                         "second computer on the same TV can't blank it (true/false)")

@@ -31,6 +31,7 @@ from . import branding
 from .config import Config, Device, fmt_timeout
 from .daemon import Daemon
 from . import idle as idle_mod
+from . import media as media_mod
 from .discovery import discover_tvs
 from .netdiag import probe_tv, subnet_report
 from .webos import WebOSClient, pair_with_fallback
@@ -1095,6 +1096,7 @@ class SettingsPanel(ttk.Frame):
         self.follow_sleep = tk.BooleanVar(value=cfg.screen_off_on_pc_sleep)
         self.deep = tk.BooleanVar(value=cfg.deep_off_enabled)
         self.only_mine = tk.BooleanVar(value=cfg.only_my_input)
+        self.while_playing = tk.BooleanVar(value=cfg.stay_on_while_playing)
         self.autostart = tk.BooleanVar(value=autostart_mod.is_enabled())
         self._status_dot = None
         self._build()
@@ -1187,6 +1189,19 @@ class SettingsPanel(ttk.Frame):
                          self.follow_sleep, self._apply,
                          desc="Follows the PC into and back out of suspend.")
         self._switch_row(
+            opts, "Not while something is playing", self.while_playing,
+            self._apply,
+            desc="Holds the sleep and power-off timers while a video or other "
+                 "media is playing on this PC. The countdown restarts when "
+                 "playback stops.")
+        # Say plainly when this system has no way to report playback, rather
+        # than leaving a switch that reads ON and quietly does nothing. Working
+        # that out means asking the session bus, so it happens off the main
+        # thread and the note appears when the answer does - a hung bus must
+        # not freeze the window on the way up.
+        self._media_note = ttk.Label(opts, style="CardMuted.TLabel",
+                                     wraplength=380, justify="left")
+        self._only_mine_row = self._switch_row(
             opts, "Only when the TV is showing this PC", self.only_mine,
             self._apply,
             desc="Leaves the TV alone when another computer or a TV app is on "
@@ -1201,6 +1216,7 @@ class SettingsPanel(ttk.Frame):
         self._input_line.pack(anchor="w", padx=(0, 0), pady=(0, 4))
         self._refresh_input_line()
         self._watch_input()
+        self._probe_media_support()
 
         # More options: energy saving + start at login. The "Power off after"
         # slider only makes sense once deep power-off is on, so it's revealed with
@@ -1227,6 +1243,35 @@ class SettingsPanel(ttk.Frame):
 
         self._refresh_status()
         self._kickoff_selftest()
+
+    # ----- can this system tell us what is playing? --------------------
+    def _probe_media_support(self):
+        """Ask, off the main thread, whether playback detection works here."""
+        def worker():
+            try:
+                available = media_mod.is_available()
+            except Exception:  # noqa: BLE001 - assume it works rather than nag
+                available = True
+            if available:
+                return
+            # Back to the UI thread through the app's queue: tkinter calls from
+            # a worker thread raise "main thread is not in main loop".
+            self.app.post(self._show_media_note)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="lgtv-easy-media-probe").start()
+
+    def _show_media_note(self):
+        try:
+            if not self.winfo_exists():
+                return
+            self._media_note.config(
+                text="Not available here — nothing on this desktop reports "
+                     "what is playing, so the timers run as usual.")
+            self._media_note.pack(anchor="w", pady=(0, 4),
+                                  before=self._only_mine_row)
+        except tk.TclError:
+            pass
 
     # ----- which input this PC is on -----------------------------------
     def _adopt_learned_device(self) -> bool:
@@ -1325,6 +1370,7 @@ class SettingsPanel(ttk.Frame):
         cfg.mute_on_sleep = self.mute.get()
         cfg.screen_off_on_pc_sleep = self.follow_sleep.get()
         cfg.only_my_input = self.only_mine.get()
+        cfg.stay_on_while_playing = self.while_playing.get()
         cfg.deep_off_enabled = self.deep.get()
         cfg.deep_off_minutes = self.deep_slider.value() / 60.0
         cfg.save()

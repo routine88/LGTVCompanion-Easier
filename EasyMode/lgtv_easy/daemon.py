@@ -4,6 +4,10 @@ Every ``poll_seconds`` it asks the OS how long the user has been idle. Cross the
 configured threshold and the TV screen is blanked; touch the keyboard or mouse
 and it comes straight back on. That is the entire job.
 
+Two things hold that timer back, because idle-at-the-keyboard is not the same as
+nobody-is-watching: the TV showing another source (see the INPUT_* constants),
+and something playing on this PC (see :mod:`lgtv_easy.media`).
+
 The loop is written with injectable dependencies (idle source, client factory,
 clock, stop event) so the whole behaviour can be stepped deterministically in
 tests without a real TV or a real wait.
@@ -16,6 +20,7 @@ import time
 from typing import Callable, Optional
 
 from . import idle as idle_mod
+from . import media as media_mod
 from . import system_sleep
 from .applog import get_logger
 from .config import Config, fmt_timeout
@@ -66,6 +71,8 @@ class Daemon:
         config: Config,
         client_factory: Optional[Callable[[], WebOSClient]] = None,
         idle_fn: Optional[Callable[[], float]] = None,
+        media_fn: Optional[Callable[[], bool]] = None,
+        media_detail_fn: Optional[Callable[[], str]] = None,
         sleep_fn: Optional[Callable[[float], None]] = None,
         clock_fn: Optional[Callable[[], float]] = None,
         sleep_watcher_factory: Optional[Callable[..., object]] = None,
@@ -76,6 +83,11 @@ class Daemon:
         self.config = config
         self.logger = logger or get_logger()
         self._idle_fn = idle_fn or idle_mod.get_idle_seconds
+        # "Is anything playing on this PC?" - injectable so tests never touch a
+        # real session bus, and so the detail string (used only in the log) can
+        # be stubbed alongside it.
+        self._media_fn = media_fn or media_mod.is_playing
+        self._media_detail_fn = media_detail_fn or media_mod.playing_detail
         # Fire Wake-on-LAN to wake the TV. Injectable so tests don't broadcast
         # real packets (or sleep through a sustained burst). Takes one arg: True
         # when waking from full standby (sustained burst), False for screen-off.
@@ -137,6 +149,12 @@ class Daemon:
         # long as the TV is showing something else (see _note_visibility), so
         # the idle countdown starts from zero when the user switches back.
         self._visible_since: Optional[float] = None
+        # Media-hold state. ``_media_since`` is when something was last seen
+        # playing, so the countdown to darkening restarts from the moment
+        # playback stops rather than firing the instant the credits roll.
+        # None until anything has ever played.
+        self._media_since: Optional[float] = None
+        self._media_playing = False      # last observed state, for one-shot logs
 
     # ----- TV connection ----------------------------------------------
     def _default_client_factory(self) -> WebOSClient:
@@ -354,6 +372,61 @@ class Daemon:
         if not mine or not seen or seen == mine:
             return
         self._visible_since = self._clock()
+
+    # ----- is something playing? ---------------------------------------
+    def _media_hold_seconds(self) -> Optional[float]:
+        """Seconds since something on this PC was last playing, or ``None``.
+
+        ``None`` means the hold does not apply at all - the setting is off, or
+        nothing has played since the daemon started - and the caller should use
+        the plain idle time. While playback is live this returns ~0, which is
+        what keeps the screen on; once it stops the value simply counts up, so
+        the ordinary timeout runs afresh from the end of the film instead of
+        blanking the moment the credits roll on somebody still sitting there.
+        """
+        if not self.config.stay_on_while_playing:
+            # Reset silently: the setting change is already logged by
+            # reload_config, and "nothing is playing any more" would be a lie
+            # about a film that is very much still running.
+            self._media_playing = False
+            self._media_since = None
+            return None
+        try:
+            playing = bool(self._media_fn())
+        except Exception as exc:  # noqa: BLE001 - detection is best-effort
+            self.logger.debug("Could not tell whether anything is playing: %s", exc)
+            playing = False
+        now = self._clock()
+        if playing:
+            self._media_since = now
+        self._note_media(playing)
+        if self._media_since is None:
+            return None
+        return now - self._media_since
+
+    def _note_media(self, playing: bool) -> None:
+        """Log the start and end of playback once each, never once per poll.
+
+        Without this the feature is invisible: "the TV stopped blanking" and
+        "the TV is broken" look identical in the log, and a stuck inhibitor
+        (an app that forgot to release it) would hold the screen on forever
+        with nothing to point at.
+        """
+        if playing == self._media_playing:
+            return
+        self._media_playing = playing
+        if playing:
+            try:
+                detail = self._media_detail_fn() or ""
+            except Exception:  # noqa: BLE001 - it is only a log line
+                detail = ""
+            self.logger.info(
+                "Something is playing on this PC%s - holding the TV on.",
+                f" ({detail})" if detail else "")
+        else:
+            self.logger.info(
+                "Nothing is playing any more; the TV will sleep after %s.",
+                fmt_timeout(self.config.idle_seconds))
 
     def _effective_idle(self, raw_idle: float) -> float:
         """How long the user has been away *from what is on the screen*.
@@ -724,6 +797,10 @@ class Daemon:
     def tick(self) -> None:
         """Evaluate idle state once and act. Safe to call from tests.
 
+        Nothing is darkened while something is playing on this PC: the sleep and
+        power-off countdowns run from the end of playback, not from the last
+        keypress.
+
         Up to three stages, mirroring a real monitor that sleeps then lets the
         PC power down:
           ON       --(idle >= idle_minutes)-->        OFF (screen blanked)
@@ -748,6 +825,12 @@ class Daemon:
         # ...but every decision below runs on time-on-screen, which is what the
         # user actually experiences (see _effective_idle).
         idle = self._effective_idle(raw_idle)
+        # Playing something holds off *darkening* only. Waking is left on the
+        # plain idle time on purpose: a video that starts on its own must not
+        # light the TV in an empty room, whereas the user pressing a key still
+        # wakes it exactly as before.
+        hold = self._media_hold_seconds()
+        darken_idle = idle if hold is None else min(idle, hold)
         # Deep power-off only makes sense strictly after the screen-off stage,
         # and only if we can wake the TV again (Wake-on-LAN needs its MAC) -
         # otherwise it would switch off and never come back on its own.
@@ -761,10 +844,10 @@ class Daemon:
                     "Deep power-off is on but no Wake-on-LAN MAC is set, so the "
                     "TV could not be woken again - skipping full power-off. Set "
                     "the MAC (lgtv-easy set --mac ..) or turn deep-off off.")
-        if self.screen_state == STATE_ON and idle >= threshold:
+        if self.screen_state == STATE_ON and darken_idle >= threshold:
             self.sleep_screen()
         elif (self.screen_state == STATE_OFF and deep
-              and idle >= self.config.deep_off_seconds):
+              and darken_idle >= self.config.deep_off_seconds):
             self.power_off_tv()
         elif self.screen_state in (STATE_OFF, STATE_STANDBY) and idle < threshold:
             # Any input resets the OS idle timer, so this fires on wake.
@@ -814,6 +897,19 @@ class Daemon:
                 "Idle detection is using the manual fallback; the OS-level "
                 "input timer is unavailable in this environment."
             )
+        # Say up front whether the "don't blank mid-film" hold can actually work
+        # here. Silence would leave a user whose desktop has no way to report
+        # playback wondering why the setting reads ON and changes nothing.
+        if self.config.stay_on_while_playing:
+            if media_mod.is_available():
+                self.logger.info(
+                    "The TV will stay on while something is playing "
+                    "(detected via: %s).", media_mod.backend_name())
+            else:
+                self.logger.warning(
+                    "'Keep the TV on while something is playing' is ON, but "
+                    "nothing on this system reports playback, so the sleep "
+                    "timer will not be held back. Everything else is unaffected.")
         # Connect once up front to learn and persist the TV's port and MAC,
         # even before the first idle event, so the config self-populates promptly.
         try:
@@ -922,14 +1018,16 @@ class Daemon:
         with self._action_lock:
             old, self.config = self.config, fresh
         if (fresh.idle_enabled, fresh.idle_minutes, fresh.deep_off_enabled,
-                fresh.deep_off_minutes) != (
+                fresh.deep_off_minutes, fresh.stay_on_while_playing) != (
                 old.idle_enabled, old.idle_minutes, old.deep_off_enabled,
-                old.deep_off_minutes):
+                old.deep_off_minutes, old.stay_on_while_playing):
             self.logger.info(
-                "Settings reloaded: idle-sleep %s after %s%s.",
+                "Settings reloaded: idle-sleep %s after %s%s%s.",
                 "ON" if fresh.idle_enabled else "OFF",
                 fmt_timeout(fresh.idle_seconds),
                 (f"; full power-off after {fmt_timeout(fresh.deep_off_seconds)}"
-                 if fresh.deep_off_enabled else ""))
+                 if fresh.deep_off_enabled else ""),
+                ("; held while something is playing"
+                 if fresh.stay_on_while_playing else ""))
         else:
             self.logger.debug("Settings reloaded (no idle/deep-off change).")

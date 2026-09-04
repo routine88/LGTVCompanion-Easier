@@ -1,5 +1,6 @@
-"""A tiny, dependency-free D-Bus *session-bus* client for one job: calling a
-no-argument method that returns a single unsigned integer (an idle-time query).
+"""A tiny, dependency-free D-Bus *session-bus* client for the handful of small
+questions Easy Mode needs to ask the desktop: how long the user has been idle,
+and whether anything is currently asking that the screen stay on.
 
 Why this exists: idle detection on Wayland has to ask the compositor's D-Bus
 service how long the user has been idle, every poll. Shelling out to ``gdbus``
@@ -9,11 +10,13 @@ holds one persistent socket to the session bus instead and marshals the single
 method call by hand, so the steady-state cost is a couple of small reads/writes.
 
 It is deliberately minimal - it speaks only enough of the D-Bus wire protocol to
-issue a no-arg ``METHOD_CALL`` and read back a ``u``/``t``/``i`` return value -
-and it never raises into the caller: ``session_get_uint`` returns ``None`` on any
-problem, so idle.py can fall back to ``gdbus`` (or another backend) cleanly. If
-the connection can't be established a few times running, it disables itself so it
-never adds overhead on a system where the native path simply doesn't work.
+issue a ``METHOD_CALL`` with simple string/uint arguments and read back the basic
+types those replies use (numbers, booleans, strings, arrays and variants of the
+same) - and it never raises into the caller: ``session_get_uint`` and
+``session_call`` return ``None`` on any problem, so callers can fall back to
+``gdbus`` (or another backend) cleanly. If the connection can't be established a
+few times running, it disables itself so it never adds overhead on a system where
+the native path simply doesn't work.
 """
 from __future__ import annotations
 
@@ -48,6 +51,139 @@ def _marshal_signature(sig: str) -> bytes:
     """Marshal a D-Bus SIGNATURE ('g'): u8 length + bytes + nul."""
     data = sig.encode("ascii")
     return struct.pack("<B", len(data)) + data + b"\0"
+
+
+# Wire alignment of each D-Bus type code we understand. Every value in a message
+# starts at an offset that is a multiple of its own alignment, counted from the
+# start of the message - which for the body means from the start of the body,
+# because the body itself is 8-aligned.
+_ALIGN = {"y": 1, "b": 4, "n": 2, "q": 2, "i": 4, "u": 4, "x": 8, "t": 8,
+          "d": 8, "s": 4, "o": 4, "g": 1, "v": 1, "a": 4, "(": 8, "{": 8}
+
+
+def _sig_len(sig: str, i: int) -> int:
+    """Length of the one complete type starting at ``sig[i]``.
+
+    Signatures are a flat string, so 'as' is one type of length 2 and '(bs)' one
+    of length 4. Callers step through a signature by adding this.
+    """
+    code = sig[i]
+    if code == "a":
+        return 1 + _sig_len(sig, i + 1)
+    if code in "({":
+        close = ")" if code == "(" else "}"
+        j = i + 1
+        while j < len(sig) and sig[j] != close:
+            j += _sig_len(sig, j)
+        return j - i + 1
+    return 1
+
+
+def _alignment(sig: str, i: int) -> int:
+    return _ALIGN.get(sig[i], 1)
+
+
+def _read_value(buf: bytes, pos: int, sig: str, i: int):
+    """Read the single complete type at ``sig[i]`` from ``buf``.
+
+    Returns ``(value, new_pos)``. Raises :class:`_DBusErrorReply` for a type we
+    don't speak, which the caller turns into "no value this time" rather than an
+    exception - the same treatment an ERROR reply gets.
+    """
+    code = sig[i]
+    if code == "y":
+        return buf[pos], pos + 1
+    if code == "b":
+        pos += _pad(pos, 4)
+        return bool(struct.unpack("<I", buf[pos:pos + 4])[0]), pos + 4
+    if code in "iu":
+        pos += _pad(pos, 4)
+        fmt = "<i" if code == "i" else "<I"
+        return struct.unpack(fmt, buf[pos:pos + 4])[0], pos + 4
+    if code in "nq":
+        pos += _pad(pos, 2)
+        fmt = "<h" if code == "n" else "<H"
+        return struct.unpack(fmt, buf[pos:pos + 2])[0], pos + 2
+    if code in "xt":
+        pos += _pad(pos, 8)
+        fmt = "<q" if code == "x" else "<Q"
+        return struct.unpack(fmt, buf[pos:pos + 8])[0], pos + 8
+    if code == "d":
+        pos += _pad(pos, 8)
+        return struct.unpack("<d", buf[pos:pos + 8])[0], pos + 8
+    if code in "so":
+        pos += _pad(pos, 4)
+        (length,) = struct.unpack("<I", buf[pos:pos + 4])
+        pos += 4
+        return buf[pos:pos + length].decode("utf-8", "replace"), pos + length + 1
+    if code == "g":
+        length = buf[pos]
+        pos += 1
+        return buf[pos:pos + length].decode("ascii", "replace"), pos + length + 1
+    if code == "v":
+        inner, pos = _read_value(buf, pos, "g", 0)   # the variant's own signature
+        if not inner:
+            raise _DBusErrorReply("empty variant signature")
+        return _read_value(buf, pos, inner, 0)
+    if code == "a":
+        pos += _pad(pos, 4)
+        (nbytes,) = struct.unpack("<I", buf[pos:pos + 4])
+        pos += 4
+        pos += _pad(pos, _alignment(sig, i + 1))   # padding before the first element
+        end = pos + nbytes
+        items = []
+        while pos < end:
+            item, pos = _read_value(buf, pos, sig, i + 1)
+            items.append(item)
+        return items, end
+    if code in "({":
+        close = ")" if code == "(" else "}"
+        pos += _pad(pos, 8)
+        items = []
+        j = i + 1
+        while j < len(sig) and sig[j] != close:
+            item, pos = _read_value(buf, pos, sig, j)
+            items.append(item)
+            j += _sig_len(sig, j)
+        return tuple(items), pos
+    raise _DBusErrorReply(f"unhandled D-Bus type {code!r}")
+
+
+def _decode_reply(sig: str, body: bytes):
+    """Decode a whole reply body. One value comes back bare, several as a tuple.
+
+    Almost every method we call returns exactly one thing, and unwrapping the
+    single-value case keeps the call sites free of ``[0]``.
+    """
+    if not sig:
+        return None
+    values, pos, i = [], 0, 0
+    while i < len(sig):
+        value, pos = _read_value(body, pos, sig, i)
+        values.append(value)
+        i += _sig_len(sig, i)
+    return values[0] if len(values) == 1 else tuple(values)
+
+
+def _marshal_body(signature: str, args) -> bytes:
+    """Marshal call arguments. Only the types we actually pass: 's', 'o' and 'u'.
+
+    Anything else raises, which is deliberate - a silently mis-marshalled body
+    would desynchronise the connection rather than fail one call.
+    """
+    out = b""
+    if len(signature) != len(args):
+        raise ValueError("argument count does not match the signature")
+    for code, value in zip(signature, args):
+        if code in "so":
+            out += b"\0" * _pad(len(out), 4)
+            out += _marshal_string(str(value))
+        elif code == "u":
+            out += b"\0" * _pad(len(out), 4)
+            out += struct.pack("<I", int(value))
+        else:
+            raise ValueError(f"cannot marshal a {code!r} argument")
+    return out
 
 
 class _Connection:
@@ -104,7 +240,7 @@ class _Connection:
         self._serial = 0
         # Every connection must say Hello before issuing other calls.
         self._call("org.freedesktop.DBus", "/org/freedesktop/DBus",
-                   "org.freedesktop.DBus", "Hello", expect_value=False)
+                   "org.freedesktop.DBus", "Hello", expect="none")
 
     @staticmethod
     def _recv_line(sock: socket.socket) -> str:
@@ -133,9 +269,11 @@ class _Connection:
         self._serial += 1
         return self._serial
 
-    def _send_method_call(self, dest, path, interface, member) -> int:
+    def _send_method_call(self, dest, path, interface, member,
+                          signature: str = "", args=()) -> int:
         assert self._sock is not None
         serial = self._next_serial()
+        body = _marshal_body(signature, args) if signature else b""
         fields = b""
 
         def add_field(code: int, sig: str, value: str) -> None:
@@ -143,21 +281,26 @@ class _Connection:
             fields += b"\0" * _pad(len(fields), 8)   # each header field is 8-aligned
             fields += struct.pack("<B", code)         # field code byte
             fields += _marshal_signature(sig)         # variant's type signature
-            fields += b"\0" * _pad(len(fields), 4)    # align to the value (4 for s/o)
-            fields += _marshal_string(value)
+            if sig == "g":                            # SIGNATURE: 1-aligned, no pad
+                fields += _marshal_signature(value)
+            else:
+                fields += b"\0" * _pad(len(fields), 4)  # align to the value (4: s/o)
+                fields += _marshal_string(value)
 
         add_field(1, "o", path)        # PATH
         add_field(6, "s", dest)        # DESTINATION
         add_field(2, "s", interface)   # INTERFACE
         add_field(3, "s", member)      # MEMBER
+        if signature:
+            add_field(8, "g", signature)   # SIGNATURE - required once there's a body
 
         header = struct.pack("<BBBB", ord("l"), 1, 0, 1)  # LE, METHOD_CALL, flags, v1
-        header += struct.pack("<I", 0)            # body length (no args)
+        header += struct.pack("<I", len(body))    # body length
         header += struct.pack("<I", serial)
         header += struct.pack("<I", len(fields))  # header-fields array length
         header += fields
-        header += b"\0" * _pad(len(header), 8)    # pad to 8 before the (empty) body
-        self._sock.sendall(header)
+        header += b"\0" * _pad(len(header), 8)    # pad to 8 before the body
+        self._sock.sendall(header + body)
         return serial
 
     def _read_message(self) -> dict:
@@ -210,16 +353,26 @@ class _Connection:
                 break  # an unfamiliar field type: stop rather than misalign
         return sig, reply_serial, error_name
 
-    def _call(self, dest, path, interface, member, expect_value=True):
-        serial = self._send_method_call(dest, path, interface, member)
+    def _call(self, dest, path, interface, member, signature: str = "", args=(),
+              expect: str = "uint"):
+        """Issue one method call and return its decoded reply.
+
+        ``expect`` is "uint" (the strict integer decode idle detection uses),
+        "any" (decode whatever the reply's signature says), or "none" (a call
+        made purely for its effect, like Hello).
+        """
+        serial = self._send_method_call(dest, path, interface, member,
+                                        signature, args)
         for _ in range(64):  # skip signals/other replies until ours arrives
             msg = self._read_message()
             if msg["reply_serial"] != serial:
                 continue
             if msg["type"] == 3 or msg["error"]:   # ERROR message
                 raise _DBusErrorReply(msg["error"] or "error")
-            if not expect_value:
+            if expect == "none":
                 return None
+            if expect == "any":
+                return _decode_reply(msg["sig"], msg["body"])
             return self._decode_uint(msg["sig"], msg["body"])
         raise OSError("no matching D-Bus reply")
 
@@ -236,9 +389,9 @@ class _Connection:
         raise _DBusErrorReply(f"unhandled reply signature {sig!r}")
 
     # ----- public ----------------------------------------------------------
-    def get_uint(self, dest, path, interface, member,
-                 timeout: float = 2.0) -> Optional[int]:
-        """Call the no-arg method and return its integer result, or ``None``.
+    def _invoke(self, dest, path, interface, member, signature, args,
+                expect, timeout):
+        """Shared body of the public calls: connect on demand, never raise.
 
         ``None`` means "no value this time" - either the bus replied with an
         error (method unsupported) or the connection had trouble. The connection
@@ -252,7 +405,8 @@ class _Connection:
                 if self._sock is None:
                     self._connect(timeout)
                 self._sock.settimeout(timeout)
-                value = self._call(dest, path, interface, member)
+                value = self._call(dest, path, interface, member,
+                                   signature, args, expect)
                 self._conn_failures = 0   # a clean round-trip: connection is good
                 return value
             except _DBusErrorReply:
@@ -265,6 +419,23 @@ class _Connection:
                 if self._conn_failures >= _MAX_CONN_FAILURES:
                     self._disabled = True
                 return None
+
+    def get_uint(self, dest, path, interface, member,
+                 timeout: float = 2.0) -> Optional[int]:
+        """Call the no-arg method and return its integer result, or ``None``."""
+        return self._invoke(dest, path, interface, member, "", (),
+                            "uint", timeout)
+
+    def call(self, dest, path, interface, member, signature: str = "", args=(),
+             timeout: float = 2.0):
+        """Call a method and return its decoded reply, or ``None``.
+
+        Unlike :meth:`get_uint` the reply is decoded from whatever signature the
+        bus sent back, so booleans, strings and arrays of strings all come back
+        as the obvious Python value.
+        """
+        return self._invoke(dest, path, interface, member, signature,
+                            tuple(args), "any", timeout)
 
     def _close_locked(self) -> None:
         if self._sock is not None:
@@ -285,3 +456,16 @@ def session_get_uint(dest: str, path: str, interface: str, member: str,
     returns ``None`` if the native D-Bus path can't answer (caller should fall
     back to ``gdbus`` or another method)."""
     return _CONN.get_uint(dest, path, interface, member, timeout=timeout)
+
+
+def session_call(dest: str, path: str, interface: str, member: str,
+                 signature: str = "", args=(), timeout: float = 2.0):
+    """Call a session-bus method and return its decoded reply, or ``None``.
+
+    Never raises. ``None`` means the native path couldn't answer - the caller
+    should fall back to ``gdbus``. Note that a method legitimately returning
+    ``None``-ish values (False, "", []) is distinguishable: only an unanswerable
+    call gives ``None`` itself.
+    """
+    return _CONN.call(dest, path, interface, member, signature, args,
+                      timeout=timeout)

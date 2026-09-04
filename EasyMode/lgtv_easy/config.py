@@ -98,6 +98,12 @@ class Config:
     # when someone is watching Netflix on it. Turn off only if the input
     # detection misreads your setup.
     only_my_input: bool = True
+    # Don't darken the TV while something is playing on this PC. A film is the
+    # one case where nobody touches the keyboard for two hours and the screen
+    # must stay on, so the sleep and power-off timers are held while a browser
+    # or a media player is playing - and restart from zero when it stops. See
+    # lgtv_easy.media for what counts as "playing" on each system.
+    stay_on_while_playing: bool = True
     # True once the setup wizard has completed successfully.
     setup_complete: bool = False
     device: Device = field(default_factory=Device)
