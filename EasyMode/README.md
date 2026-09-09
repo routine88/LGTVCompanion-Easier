@@ -34,9 +34,10 @@ python3 -m lgtv_easy repair     # self-test the TV connection and auto-fix a mov
 | `webos.py` / `_ws.py` | the WebOS WebSocket protocol + pairing |
 | `discovery.py` | finding TVs on the network (SSDP) |
 | `recovery.py` | quick on-demand reconnect, healing a stale IP by MAC |
-| `selfheal.py` | the escalating self-test + repair engine (startup check, "Test my TV", `repair`) |
+| `selfheal.py` | the escalating self-test + repair engine (startup check, "Test my TV", `repair`) and the unattended `diagnose` the watcher runs on itself |
 | `wol.py` | Wake-on-LAN magic packets |
-| `netdiag.py` | network diagnostics (incl. the Google/Nest Wifi hint) |
+| `netdiag.py` | network diagnostics (incl. the Google/Nest Wifi hint) and which interfaces this PC actually has |
+| `notify.py` | desktop notifications, for when the watcher has something to say and no window to say it in |
 | `config.py` | the tiny JSON settings file |
 | `autostart.py` | start-at-login registration |
 | `dock.py` | keeps an icon on the launcher bar - the dock/favourites on Linux, Quick Launch (and, if Windows allows, the taskbar) on Windows |

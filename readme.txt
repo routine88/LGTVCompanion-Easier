@@ -51,6 +51,32 @@ with "Not while something is playing" in the settings window if you would rather
 the timeout always won.
 
 
+IF IT STOPS WORKING
+-------------------
+It checks itself. When the TV has been unreachable for a couple of minutes the
+watcher stops retrying quietly and goes and finds out why: which network this PC
+is on, whether the TV's address still answers, and whether the TV has moved to a
+new one (routers hand out new addresses after a power cut - it finds the TV again
+by its MAC and carries on).
+
+What happens next depends on what it found:
+
+  TV switched off      Nothing. That is the normal overnight state, and the
+                       watcher picks the TV up again by itself when it returns.
+  TV needs re-pairing  A desktop notification, and the setup window opens.
+  Wrong/no network     A desktop notification saying which.
+
+Whatever it concludes is waiting for you next time you open the app - in red, at
+the top - and in:
+
+    lgtv-easy status          (look for the "Self-check" line)
+    lgtv-easy repair          run the same check right now, in a terminal
+
+If the TV will not wake at all after a power cut, switch it on once with the
+remote: LG panels commonly drop out of "always ready" when mains power is lost,
+and Wake-on-LAN cannot reach a TV whose network chip is off.
+
+
 OR RUN IT WITHOUT INSTALLING
 ----------------------------
 The portable route. It keeps itself up to date from the project's repository,
