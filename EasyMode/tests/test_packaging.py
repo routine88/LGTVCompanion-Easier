@@ -11,7 +11,7 @@ import re
 
 import pytest
 
-from lgtv_easy import branding
+from lgtv_easy import branding, dock
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 WIN = os.path.join(REPO, "packaging", "windows")
@@ -37,6 +37,9 @@ def test_the_packaging_files_exist():
     # Start Menu and desktop icons, and autostart uses it for the login entry.
     assert os.path.exists(os.path.join(REPO, "EasyMode", "lgtv_easy",
                                        "winshortcut.py"))
+    # And the launcher-bar module, which both installers call to put the app
+    # where the user actually clicks.
+    assert os.path.exists(os.path.join(REPO, "EasyMode", "lgtv_easy", "dock.py"))
     for name in ("install.sh", "uninstall.sh"):
         assert os.path.exists(os.path.join(LINUX, name)), f"missing linux/{name}"
 
@@ -46,8 +49,9 @@ def test_the_installer_uses_the_packaged_shortcut_writer():
     installer = read(WIN, "installer.py")
     assert "from lgtv_easy import winshortcut as shortcuts" in installer
     spec = read(WIN, "installer.spec")
-    assert "lgtv_easy.winshortcut" in spec, (
-        "the frozen installer must bundle the module it imports")
+    for module in ("lgtv_easy.winshortcut", "lgtv_easy.dock"):
+        assert module in spec, (
+            f"the frozen installer must bundle {module}, which it imports")
 
 
 def test_the_installer_stamps_the_apps_own_app_id():
@@ -90,6 +94,27 @@ def test_the_installer_registers_an_uninstaller():
     # (and much more annoying) product.
     assert "LOCALAPPDATA" in installer
     assert "HKEY_LOCAL_MACHINE" not in installer
+
+
+def test_the_windows_installer_puts_the_app_on_the_launcher_bar():
+    """A Start Menu entry is not somewhere anyone looks. Quick Launch is a plain
+    folder of shortcuts, so it is the one launcher-bar slot an installer can
+    actually fill on Windows - the taskbar pin has had no supported API since
+    8.1, which is why it is attempted rather than relied on."""
+    installer = read(WIN, "installer.py")
+    assert "quick_launch_link()" in installer
+    assert "dock.quick_launch_link()" in installer, (
+        "the path must come from lgtv_easy.dock, or the installer and the app's "
+        "own switch write two different files and the icon appears twice")
+    assert "quick_launch=" in installer, "the choice must be plumbed through"
+    assert "try_pin_to_taskbar" in installer
+
+
+def test_the_windows_uninstaller_takes_the_launcher_bar_icon_with_it():
+    installer = read(WIN, "installer.py")
+    body = installer.split("def uninstall(")[1].split("\ndef ")[0]
+    assert "_remove(quick_launch_link())" in body
+    assert "try_unpin_from_taskbar" in body
 
 
 def test_the_uninstaller_steps_out_of_the_folder_it_deletes():
@@ -144,6 +169,28 @@ def test_uninstall_removes_exactly_what_install_created():
     assert "$ICONS_DIR" in uninstall
     # Settings are the user's, not ours: they survive unless --purge is given.
     assert "PURGE" in uninstall
+
+
+def test_the_linux_installer_pins_the_app_to_the_dock():
+    """The .desktop file puts the app in the applications menu; nothing about
+    that makes an icon appear on the dock, which is where an Ubuntu user looks
+    for it. The installer has to ask for the pin explicitly."""
+    sh = read(LINUX, "install.sh")
+    assert '"$LAUNCHER" dock add' in sh
+    assert "--no-dock-icon" in sh, "and it has to be declinable"
+    # Per-user state written through the caller's own session bus: a --system
+    # install running as root would otherwise pin the app to root's dock.
+    pin = sh.split("# ---- the dock / favourites bar")[1].split("# ----")[0]
+    assert '[ "$SYSTEM" != "1" ]' in pin
+
+
+def test_linux_uninstall_unpins_before_it_deletes_the_app():
+    """Ordering matters: once the launcher is gone, nothing on the machine can
+    unpin it, and the dock keeps a dead icon the user cannot get rid of."""
+    sh = read(LINUX, "install.sh")
+    uninstall = sh.split('if [ "$MODE" = "uninstall" ]')[1].split("exit 0")[0]
+    assert '"$LAUNCHER" dock remove' in uninstall
+    assert uninstall.index('dock remove') < uninstall.index('rm -rf "$LIB_DIR"')
 
 
 def test_the_installer_does_not_power_the_tv_off_while_installing():

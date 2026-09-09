@@ -7,7 +7,7 @@ REM
 REM    * the installed copy from LGTVCompanionEasyMode-Setup.exe
 REM    * the self-updating copy the portable "Windows Launch.bat" downloads
 REM    * the start-at-login entry AND the power-off-at-shutdown Scheduled Task
-REM    * the Start Menu and Desktop shortcuts
+REM    * the Start Menu, Desktop and Quick Launch shortcuts
 REM    * the Add/Remove Programs entry
 REM
 REM  Why this exists when Settings -> Apps already has an Uninstall button: that
@@ -46,6 +46,9 @@ set "INSTALL_DIR=%LOCALAPPDATA%\Programs\%APP_NAME%"
 set "PORTABLE_DIR=%LOCALAPPDATA%\lgtv-companion-easy"
 set "STATE_DIR=%APPDATA%\%APP_NAME%"
 set "PROGRAMS_DIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs"
+REM Quick Launch is a plain folder of shortcuts, and it has lived at this
+REM path since Internet Explorer put it there - the taskbar reads it too.
+set "QUICKLAUNCH_DIR=%APPDATA%\Microsoft\Internet Explorer\Quick Launch"
 set "STARTUP_DIR=%PROGRAMS_DIR%\Startup"
 
 set "PURGE=ask"
@@ -171,6 +174,8 @@ call :rm_task "%SHUTDOWN_TASK%"
 
 echo  Removing shortcuts...
 call :rm_file "%PROGRAMS_DIR%\%APP_NAME%.lnk"
+call :rm_file "%QUICKLAUNCH_DIR%\%APP_NAME%.lnk"
+call :rm_file "%QUICKLAUNCH_DIR%\User Pinned\TaskBar\%APP_NAME%.lnk"
 call :rm_desktop_shortcuts
 
 echo  Removing the app...

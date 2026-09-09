@@ -11,8 +11,11 @@ INSTALL IT
 ----------
   Windows : run   LGTVCompanionEasyMode-Setup.exe   (it's right here in this
             folder)
-            You get a desktop icon and a Start Menu entry, and it can start
-            watching for idle automatically when you log in. Nothing opens a
+            You get a desktop icon, a Start Menu entry and a Quick Launch
+            icon, and it can start watching for idle automatically when you
+            log in. (Windows does not let an installer pin to the taskbar
+            itself - right-click the app there once and choose "Pin to
+            taskbar" if you want it to stay.) Nothing opens a
             terminal: the app is a real Windows program, and it starts at login
             through a shortcut rather than a batch file.
             It installs for your account only, so it never asks for an
@@ -26,10 +29,12 @@ INSTALL IT
   Linux   : open a terminal in this folder and run
                 sh packaging/linux/install.sh
             It adds the app to your applications menu with its own icon, puts a
-            shortcut on your desktop, and installs the bits it needs
-            (python3-tk and friends). No root needed.
+            shortcut on your desktop, pins it to your dock, and installs the
+            bits it needs (python3-tk and friends). No root needed.
+            (--no-dock-icon and --no-desktop-icon if you would rather not.)
 
-Then open "LGTV Companion Easy Mode" from the desktop icon or your menu. The
+Then open "LGTV Companion Easy Mode" from the dock, the desktop icon or your
+menu. The
 first run walks through 3 steps:
 
   1. Find your TV   - click Scan (or type its IP).
@@ -80,7 +85,7 @@ TO UNINSTALL
 
 Both remove everything, whichever way you installed it: the installed copy, the
 self-updating copy the portable launcher downloads, the start-at-login entry,
-the shutdown task, and the shortcuts. Your settings are KEPT so a reinstall
+the shutdown task, the shortcuts, and the icon on your dock / Quick Launch bar. Your settings are KEPT so a reinstall
 needs no setup - add --purge to delete those too.
 
 Prefer the built-in routes? They still work, they just only know about the copy

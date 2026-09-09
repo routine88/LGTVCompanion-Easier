@@ -11,6 +11,7 @@
 #    * menu entry          -> ~/.local/share/applications/
 #    * icons, every size   -> ~/.local/share/icons/hicolor/*/apps/
 #    * a desktop shortcut  -> ~/Desktop (marked trusted, so it just works)
+#    * a dock icon         -> the shell's favourites (Ubuntu dock / GNOME etc.)
 #    * optionally, start-at-login
 #
 #  Run it from anywhere:      sh packaging/linux/install.sh
@@ -35,6 +36,7 @@ SOURCE_PKG="$REPO_DIR/EasyMode/lgtv_easy"
 MODE="install"
 SYSTEM=0
 WANT_DESKTOP_ICON=1
+WANT_DOCK_ICON=1
 WANT_AUTOSTART=1
 WANT_DEPS=1
 PURGE=0
@@ -48,6 +50,7 @@ Usage: sh install.sh [options]
 
   --system          install for all users (needs root; /opt + /usr/share)
   --no-desktop-icon do not put a shortcut on the Desktop
+  --no-dock-icon    do not pin the app to the dock / favourites bar
   --no-autostart    do not start the TV watcher when you log in
   --no-deps         do not try to install python3-tk and friends
   --uninstall       remove the app again (keeps your settings)
@@ -61,6 +64,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --system) SYSTEM=1 ;;
         --no-desktop-icon) WANT_DESKTOP_ICON=0 ;;
+        --no-dock-icon) WANT_DOCK_ICON=0 ;;
         --no-autostart) WANT_AUTOSTART=0 ;;
         --no-deps) WANT_DEPS=0 ;;
         --uninstall|--remove) MODE="uninstall" ;;
@@ -128,6 +132,9 @@ if [ "$MODE" = "uninstall" ]; then
     stop_watcher
     if [ -x "$LAUNCHER" ]; then
         "$LAUNCHER" autostart disable >/dev/null 2>&1 || true
+        # Unpin first: once $LIB_DIR is gone the dock keeps a dead icon that
+        # nothing on the machine knows how to remove.
+        "$LAUNCHER" dock remove >/dev/null 2>&1 || true
     fi
     rm -f "$AUTOSTART_FILE"
     rm -f "$DESKTOP_FILE" "$LAUNCHER"
@@ -312,6 +319,16 @@ have update-desktop-database && update-desktop-database "$APPS_DIR" 2>/dev/null 
 have gtk-update-icon-cache && gtk-update-icon-cache -f -t "$ICONS_DIR" 2>/dev/null || true
 have xdg-desktop-menu && xdg-desktop-menu forceupdate 2>/dev/null || true
 
+# ---- the dock / favourites bar ----------------------------------------------
+# A menu entry is not an icon anybody sees. GNOME-family shells keep the dock's
+# contents in a GSettings list of desktop-file ids, which is per-user state and
+# needs the caller's own session bus - so a --system install deliberately leaves
+# it alone rather than writing root's dock.
+if [ "$WANT_DOCK_ICON" = "1" ] && [ "$SYSTEM" != "1" ]; then
+    dock_result=$("$LAUNCHER" dock add 2>&1) || true
+    say "  dock     -> ${dock_result#Launcher bar: }"
+fi
+
 # ---- start at login ----------------------------------------------------------
 if [ "$WANT_AUTOSTART" = "1" ]; then
     if "$LAUNCHER" autostart enable >/dev/null 2>&1; then
@@ -333,7 +350,7 @@ esac
 say "
 $APP_NAME is installed.
 
-  Open it     : from your applications menu, or the desktop icon
+  Open it     : from the dock, your applications menu, or the desktop icon
   In a shell  : $CLI_NAME gui        (setup)   /   $CLI_NAME status
   Uninstall   : sh $SELF_DIR/install.sh --uninstall
 

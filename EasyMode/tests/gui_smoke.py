@@ -16,6 +16,11 @@ os.environ.setdefault("LGTV_EASY_NO_SLEEP_WATCH", "1")
 # Keep the panel's automatic startup self-test from firing real network probes;
 # the repair-dialog scenario below drives the repair flow explicitly instead.
 os.environ.setdefault("LGTV_EASY_NO_SELFTEST", "1")
+# The settings panel asks whether the app is on the dock, and offers a switch
+# that would pin it for real. Point that at a throwaway directory so building
+# the panel here can never rearrange the dock of whoever ran this.
+os.environ.setdefault("LGTV_EASY_DOCK_SANDBOX",
+                      tempfile.mkdtemp(prefix="lgtv-gui-dock-"))
 
 from lgtv_easy import gui  # noqa: E402
 from lgtv_easy.mock_tv import MockTV  # noqa: E402

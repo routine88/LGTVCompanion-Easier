@@ -42,6 +42,14 @@ os.environ.setdefault("LGTV_EASY_HOME",
 os.environ.setdefault("LGTV_EASY_AUTOSTART_SANDBOX",
                       tempfile.mkdtemp(prefix="lgtv-easy-autostart-"))
 
+# The launcher bar is the other one: on Linux it is a GSettings key belonging to
+# the running shell, on Windows a folder under %APPDATA%. A test that pinned or
+# unpinned for real would rearrange the dock of whoever ran the suite - and the
+# unpin is the bad half, because it silently deletes an icon the developer put
+# there. Same treatment: a throwaway directory for the whole run.
+os.environ.setdefault("LGTV_EASY_DOCK_SANDBOX",
+                      tempfile.mkdtemp(prefix="lgtv-easy-dock-"))
+
 
 # ----- the tests must not touch anything on the real network -----------------
 # This app's whole job is talking to a TV on the LAN, and a test that slips past

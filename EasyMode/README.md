@@ -39,6 +39,8 @@ python3 -m lgtv_easy repair     # self-test the TV connection and auto-fix a mov
 | `netdiag.py` | network diagnostics (incl. the Google/Nest Wifi hint) |
 | `config.py` | the tiny JSON settings file |
 | `autostart.py` | start-at-login registration |
+| `dock.py` | keeps an icon on the launcher bar - the dock/favourites on Linux, Quick Launch (and, if Windows allows, the taskbar) on Windows |
+| `winshortcut.py` | writes Windows `.lnk` shortcuts that carry the app's AppUserModelID |
 | `singleton.py` | one-watcher-at-a-time lock |
 | `proc.py` | starts every helper program windowless (no console flashing on Windows) |
 | `LGTV-Easy-Mode-WINDOWS.ps1` | the Windows launcher engine the root `.bat` runs |

@@ -5,9 +5,11 @@ application inside it (see installer.spec). What it does is deliberately small
 and per-user, so it never needs an administrator:
 
 * copies the app into ``%LOCALAPPDATA%\\Programs\\LGTV Companion Easy Mode``
-* creates the Start Menu and Desktop shortcuts - stamped with the app's
-  AppUserModelID, which is what makes Windows show the app's own icon on the
-  taskbar and pin it as one button (see shortcuts.py)
+* creates the Start Menu, Desktop and Quick Launch shortcuts - stamped with
+  the app's AppUserModelID, which is what makes Windows show the app's own icon
+  on the taskbar and pin it as one button (see shortcuts.py)
+* asks Windows to pin it to the taskbar, which modern builds are free to refuse
+  (see lgtv_easy.dock); the Quick Launch shortcut is there either way
 * optionally registers the watcher to start at login
 * registers itself in Add/Remove Programs, and can uninstall cleanly
 
@@ -16,6 +18,7 @@ Command line (for scripted installs; everything else opens the window):
     Setup.exe /S                    install silently with the defaults
     Setup.exe /D=<dir>              install somewhere else
     Setup.exe /desktop=0            skip the desktop icon
+    Setup.exe /quicklaunch=0        skip the Quick Launch / taskbar icon
     Setup.exe /autostart=0          do not start at login
     Setup.exe /launch=0             do not open the app afterwards
     Setup.exe /uninstall [/S]       remove it again
@@ -35,6 +38,7 @@ import time
 import winreg
 from pathlib import Path
 
+from lgtv_easy import dock
 from lgtv_easy import winshortcut as shortcuts
 
 APP_NAME = "LGTV Companion Easy Mode"
@@ -131,6 +135,13 @@ def desktop_link() -> Path:
     return shell_folder("Desktop") / f"{APP_NAME}.lnk"
 
 
+def quick_launch_link() -> Path:
+    """The Quick Launch shortcut. The path comes from lgtv_easy.dock so the
+    installer and the app's own "show me in Quick Launch" switch cannot drift
+    apart and leave two copies of the icon behind."""
+    return dock.quick_launch_link()
+
+
 def installed_location() -> "Path | None":
     """Where a previous install put itself, if there is one."""
     try:
@@ -169,14 +180,15 @@ def current_choices() -> dict:
     icon they deleted, is an update that overrules them.
     """
     if installed_location() is None:
-        return {"desktop": True, "autostart": True}
+        return {"desktop": True, "quicklaunch": True, "autostart": True}
     return {"desktop": desktop_link().exists(),
+            "quicklaunch": quick_launch_link().exists(),
             "autostart": autostart_registered()}
 
 
 # ----- install ----------------------------------------------------------------
-def install(dest: Path, *, desktop_icon: bool = True, autostart: bool = True,
-            progress=lambda _msg: None) -> Path:
+def install(dest: Path, *, desktop_icon: bool = True, quick_launch: bool = True,
+            autostart: bool = True, progress=lambda _msg: None) -> Path:
     """Install into ``dest``. Returns the path of the installed app exe."""
     if not PAYLOAD.is_dir():
         raise RuntimeError(
@@ -198,10 +210,13 @@ def install(dest: Path, *, desktop_icon: bool = True, autostart: bool = True,
     log(f"  copied {dir_size_kb(dest)} KB; icon at {icon}")
 
     progress("Creating shortcuts…")
-    for link, wanted in ((start_menu_link(), True), (desktop_link(), desktop_icon)):
+    for link, wanted in ((start_menu_link(), True),
+                         (desktop_link(), desktop_icon),
+                         (quick_launch_link(), quick_launch)):
         if not wanted:
             continue
         try:
+            link.parent.mkdir(parents=True, exist_ok=True)
             shortcuts.create_shortcut(
                 link, app_exe, working_dir=str(dest), icon=str(icon),
                 description="Sleep your LG TV like a PC monitor", app_id=APP_ID)
@@ -211,7 +226,17 @@ def install(dest: Path, *, desktop_icon: bool = True, autostart: bool = True,
             log(f"  WARNING: could not create {link}: {exc}")
     if not desktop_icon:
         _remove(desktop_link())
+    if not quick_launch:
+        _remove(quick_launch_link())
     shortcuts.notify_shell_changed()
+
+    # The taskbar has no supported API - Microsoft removed the pin in 8.1 - so
+    # this is a genuine try, not a guarantee, and a refusal is not a failure:
+    # the Quick Launch shortcut above is already in place and carries the same
+    # AppUserModelID, so a hand-pin costs one right-click.
+    if quick_launch:
+        pinned = dock.try_pin_to_taskbar(quick_launch_link())
+        log(f"  taskbar pin: {'accepted' if pinned else 'refused by Windows'}")
 
     progress("Registering…")
     register_uninstall(dest, app_exe, icon)
@@ -283,8 +308,12 @@ def uninstall(dest: Path, *, purge_settings: bool = False,
     time.sleep(0.5)          # let Windows release the image locks
 
     progress("Removing shortcuts…")
+    # Unpin before deleting the shortcut it points at: a taskbar button whose
+    # .lnk has gone is one the user cannot get rid of from the taskbar either.
+    dock.try_unpin_from_taskbar(quick_launch_link())
     _remove(start_menu_link())
     _remove(desktop_link())
+    _remove(quick_launch_link())
     shortcuts.notify_shell_changed()
 
     progress("Removing files…")
@@ -342,6 +371,7 @@ class SetupWindow:
 
         self.dest = tk.StringVar(value=str(dest))
         self.desktop = tk.BooleanVar(value=options.get("desktop", True))
+        self.quicklaunch = tk.BooleanVar(value=options.get("quicklaunch", True))
         self.autostart = tk.BooleanVar(value=options.get("autostart", True))
         self.launch = tk.BooleanVar(value=options.get("launch", True))
         self.purge = tk.BooleanVar(value=options.get("purge", False))
@@ -454,6 +484,9 @@ class SetupWindow:
                 side="left", padx=(8, 0))
             ttk.Checkbutton(card, text="Create a desktop icon",
                             variable=self.desktop, style="TCheckbutton").pack(anchor="w")
+            ttk.Checkbutton(card, text="Add it to the Quick Launch bar",
+                            variable=self.quicklaunch, style="TCheckbutton").pack(
+                anchor="w", pady=(6, 0))
             ttk.Checkbutton(card, text="Start watching for idle when I log in",
                             variable=self.autostart, style="TCheckbutton").pack(
                 anchor="w", pady=(6, 0))
@@ -461,9 +494,11 @@ class SetupWindow:
                             variable=self.launch, style="TCheckbutton").pack(
                 anchor="w", pady=(6, 0))
             ttk.Label(self.body,
-                      text="A Start Menu entry is always created. To keep it on "
-                           "the taskbar, right-click the app there once it is "
-                           "running and choose “Pin to taskbar”.",
+                      text="A Start Menu entry is always created. Windows does "
+                           "not let an installer pin to the taskbar itself, so "
+                           "if it does not appear there, right-click the app on "
+                           "the taskbar once it is running and choose "
+                           "“Pin to taskbar”.",
                       style="Sub.TLabel", wraplength=470,
                       justify="left").pack(anchor="w", pady=(12, 0))
             action = verb
@@ -523,6 +558,7 @@ class SetupWindow:
         try:
             if self.mode == "install":
                 app_exe = install(dest, desktop_icon=self.desktop.get(),
+                                  quick_launch=self.quicklaunch.get(),
                                   autostart=self.autostart.get(),
                                   progress=self._progress)
                 self._done(app_exe)
@@ -542,9 +578,15 @@ class SetupWindow:
             self._header("Uninstalled", f"{APP_NAME} has been removed. Your TV "
                                         "settings on the TV itself are untouched.")
         else:
+            places = ["in your Start Menu"]
+            if self.desktop.get():
+                places.append("on your desktop")
+            if self.quicklaunch.get():
+                places.append("in Quick Launch")
+            where = places[0] if len(places) == 1 else \
+                ", ".join(places[:-1]) + " and " + places[-1]
             self._header("Installed",
-                         f"{APP_NAME} is in your Start Menu"
-                         + (" and on your desktop." if self.desktop.get() else ".")
+                         f"{APP_NAME} is {where}."
                          + ("\nIt will start watching for idle when you log in."
                             if self.autostart.get() else ""))
         nav = ttk.Frame(self.body)
@@ -585,12 +627,13 @@ class SetupWindow:
 def parse_args(argv) -> dict:
     """NSIS-style switches: /S, /D=path, /flag=0|1. Case-insensitive.
 
-    ``desktop``/``autostart`` start as None - "not asked for either way" - so a
-    plain run can fall back to what the machine already has (see
-    :func:`current_choices`) instead of overriding it.
+    ``desktop``/``quicklaunch``/``autostart`` start as None - "not asked for
+    either way" - so a plain run can fall back to what the machine already has
+    (see :func:`current_choices`) instead of overriding it.
     """
     opts = {"silent": False, "uninstall": False, "purge": False, "dir": None,
-            "desktop": None, "autostart": None, "launch": True, "from": None}
+            "desktop": None, "quicklaunch": None, "autostart": None,
+            "launch": True, "from": None}
     for raw in argv:
         arg = raw.lstrip("-")
         low = arg.lower()
@@ -606,7 +649,7 @@ def parse_args(argv) -> dict:
             opts["from"] = arg[5:].strip('"')
         elif "=" in low:
             name, _, value = low.partition("=")
-            if name in ("desktop", "autostart", "launch"):
+            if name in ("desktop", "quicklaunch", "autostart", "launch"):
                 opts[name] = value not in ("0", "no", "false", "off")
     return opts
 
@@ -637,6 +680,7 @@ def main(argv=None) -> int:
             opts[name] = value
     if opts["silent"]:
         app_exe = install(dest, desktop_icon=opts["desktop"],
+                          quick_launch=opts["quicklaunch"],
                           autostart=opts["autostart"])
         if opts["launch"]:
             subprocess.Popen([str(app_exe)], cwd=str(dest))

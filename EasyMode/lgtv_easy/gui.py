@@ -30,6 +30,7 @@ from . import autostart as autostart_mod
 from . import branding
 from .config import Config, Device, fmt_timeout
 from .daemon import Daemon
+from . import dock as dock_mod
 from . import idle as idle_mod
 from . import media as media_mod
 from .discovery import discover_tvs
@@ -1098,6 +1099,7 @@ class SettingsPanel(ttk.Frame):
         self.only_mine = tk.BooleanVar(value=cfg.only_my_input)
         self.while_playing = tk.BooleanVar(value=cfg.stay_on_while_playing)
         self.autostart = tk.BooleanVar(value=autostart_mod.is_enabled())
+        self.dock = tk.BooleanVar(value=dock_mod.is_pinned())
         self._status_dot = None
         self._build()
 
@@ -1239,6 +1241,13 @@ class SettingsPanel(ttk.Frame):
         self._autostart_row = self._switch_row(
             more, "Start automatically when I log in",
             self.autostart, self._apply_autostart)
+        # Offered only where it can actually be honoured: on KDE, and on any
+        # desktop that keeps its launcher bar somewhere we cannot write, a switch
+        # that silently does nothing is worse than no switch at all.
+        if dock_mod.supported()[0]:
+            self._switch_row(
+                more, f"Keep an icon on {dock_mod.BAR_NAME}", self.dock,
+                self._apply_dock)
         self._sync_deep_row()
 
         self._refresh_status()
@@ -1382,6 +1391,13 @@ class SettingsPanel(ttk.Frame):
     def _apply_autostart(self):
         autostart_mod.set_enabled(self.autostart.get())
         self._refresh_status()
+
+    def _apply_dock(self):
+        dock_mod.set_pinned(self.dock.get())
+        # The dock can decline - a shell that ignores the setting, a GSettings
+        # write that failed - so show what is actually true now rather than what
+        # was asked for.
+        self.dock.set(dock_mod.is_pinned())
 
     def _kill_service(self):
         """Stop the watcher for good. No confirmation dialog: this is trivially

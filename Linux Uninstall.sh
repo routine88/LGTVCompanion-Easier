@@ -8,6 +8,7 @@
 #    * the self-updating clone the portable "Linux Launch.sh" downloads
 #    * the start-at-login entry
 #    * the applications-menu entry, the desktop shortcut and the icons
+#    * the pinned icon on the dock / favourites bar
 #
 #  Why this exists when packaging/linux/uninstall.sh already does the first
 #  half: that one is a wrapper around the installer, so it only knows what the
@@ -181,6 +182,40 @@ if [ -x "$LAUNCHER" ]; then
     "$LAUNCHER" autostart disable >/dev/null 2>&1 || true
 fi
 rm_path "$AUTOSTART_FILE"
+
+# The dock's contents are a GSettings list of desktop-file ids, and this script
+# has to work when the app that could unpin itself is already gone - so it is
+# done here in shell rather than by asking the app. Left behind, the pinned icon
+# survives every other kind of cleanup and cannot be removed from the dock,
+# because the entry it names no longer exists to right-click.
+unpin_from_dock() {
+    have gsettings || return 0
+    schemas=$(gsettings list-schemas 2>/dev/null || true)
+    for pair in "org.gnome.shell favorite-apps" \
+                "org.cinnamon favorite-apps" \
+                "org.buddiesofbudgie.budgie-panel pinned-launchers" \
+                "com.solus-project.budgie-panel pinned-launchers" \
+                "com.canonical.Unity.Launcher favorites"; do
+        schema=${pair%% *}
+        key=${pair##* }
+        printf '%s\n' "$schemas" | grep -qx "$schema" || continue
+        current=$(gsettings get "$schema" "$key" 2>/dev/null || true)
+        case "$current" in *"$APP_ID.desktop"*) ;; *) continue ;; esac
+        # Three passes so the entry goes whether it is first, last or alone; the
+        # [^']* allows for Unity's "application://" prefix on the same id.
+        new=$(printf '%s' "$current" \
+            | sed -e "s/'[^']*$APP_ID\.desktop', *//" \
+                  -e "s/, *'[^']*$APP_ID\.desktop'//" \
+                  -e "s/'[^']*$APP_ID\.desktop'//")
+        if gsettings set "$schema" "$key" "$new" 2>/dev/null; then
+            REMOVED=1
+            say "  unpinned from the dock ($schema)"
+        fi
+    done
+}
+
+say "Removing the dock icon..."
+unpin_from_dock
 
 say "Removing the menu entry, shortcut and icons..."
 rm_path "$APPS_DIR/$APP_ID.desktop"

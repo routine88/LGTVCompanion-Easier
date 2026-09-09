@@ -414,6 +414,30 @@ function Exit-IfServiceStopped {
     exit 0
 }
 
+# ---- desktop integration, once ----------------------------------------------
+# This launcher used to leave nothing behind that anyone could click: no Quick
+# Launch icon and nothing on the desktop, so the only route back into the app was
+# to go and find this .ps1 again. Ask the app to put itself where Windows expects
+# to find it.
+#
+# Once, though - not on every launch. Re-creating the shortcut at each start
+# would put back an icon the user had deliberately deleted, and an app that
+# quietly overrules that is one people uninstall. The Quick Launch shortcut's
+# existence is the "already done" marker: the app writes it the first time and
+# never again.
+function Add-DesktopIntegration {
+    # The detached supervisor is a re-invocation of this same script; the run
+    # that spawned it has already been through here.
+    if ($Supervise) { return }
+    $quick = Join-Path $env:APPDATA "Microsoft\Internet Explorer\Quick Launch"
+    $link = Join-Path $quick "LGTV Companion Easy Mode.lnk"
+    if (Test-Path $link) { return }
+    Run-Cli @("dock", "add", "--with-desktop-shortcut") | Out-Null
+    if (Test-Path $link) {
+        Log "Added Easy Mode to Quick Launch and the desktop."
+    }
+}
+
 function Needs-Setup {
     $cfg = Join-Path $StateDir "config.json"
     if (-not (Test-Path $cfg)) { return $true }
@@ -557,6 +581,8 @@ if ($env:LGTV_EASY_HANDOFF -eq "1") {
     Write-Host $Rule -ForegroundColor Cyan
     Write-Host ""
 }
+
+Add-DesktopIntegration
 
 if ($Setup) {
     Log "Opening the setup window (forced)."

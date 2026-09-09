@@ -51,7 +51,10 @@ a = Analysis(
     pathex=[str(HERE), str(REPO / "EasyMode")],   # for lgtv_easy.winshortcut
     binaries=[],
     datas=datas,
-    hiddenimports=["lgtv_easy.winshortcut"],
+    # winshortcut writes the .lnk files; dock knows where the Quick Launch one
+    # goes and how to ask Windows for the taskbar pin. Neither is imported by
+    # name PyInstaller can follow from a frozen entry point.
+    hiddenimports=["lgtv_easy.winshortcut", "lgtv_easy.dock"],
     excludes=["numpy", "PIL", "pytest", "setuptools", "pip", "pkg_resources"],
     noarchive=False,
 )

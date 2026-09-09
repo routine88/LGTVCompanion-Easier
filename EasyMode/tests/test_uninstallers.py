@@ -18,7 +18,7 @@ import subprocess
 
 import pytest
 
-from lgtv_easy import autostart
+from lgtv_easy import autostart, dock
 from lgtv_easy.config import config_dir
 
 REPO_ROOT = os.path.abspath(
@@ -58,6 +58,15 @@ def test_windows_removes_both_kinds_of_install():
     assert "%LOCALAPPDATA%\\Programs\\%APP_NAME%" in bat
     # ...and the self-updating clone the portable launcher downloads.
     assert "%LOCALAPPDATA%\\lgtv-companion-easy" in bat
+
+
+def test_windows_removes_the_launcher_bar_shortcut():
+    """Quick Launch is a folder like any other, and the shortcut in it outlives
+    the app unless something deletes it - leaving a launcher-bar icon that opens
+    an error box."""
+    bat = _read(WIN_BAT)
+    assert "Quick Launch" in bat
+    assert '%QUICKLAUNCH_DIR%\\%APP_NAME%.lnk' in bat
 
 
 def test_windows_keeps_settings_unless_asked():
@@ -165,3 +174,19 @@ def test_both_scripts_survive_deleting_their_own_directory():
     # uninstall halfway - login entry gone, app still there, or the reverse.
     assert "TEMP_COPY" in _read(WIN_BAT)
     assert "LGTV_UNINSTALL_RELAUNCHED" in _read(LINUX_SH)
+
+
+def test_linux_unpins_from_the_dock_without_needing_the_app():
+    """This script has to work when the app is already gone - that is the state
+    it exists to clean up - so the unpin cannot be delegated to the app the way
+    the autostart removal is. A pinned icon left behind is the one leftover the
+    user cannot remove by hand: right-clicking it offers nothing, because the
+    .desktop file it names no longer exists."""
+    sh = _read(LINUX_SH)
+    assert "gsettings" in sh, "the dock's contents live in GSettings"
+    assert "unpin_from_dock" in sh
+    body = sh.split("unpin_from_dock() {")[1].split("\n}")[0]
+    # Every shell whose favourites list we might have written to on the way in.
+    for schema, key, _prefix in dock._FAVOURITE_KEYS:
+        assert f"{schema} {key}" in body, f"{schema} is pinned to but never unpinned"
+    assert "gsettings set" in body

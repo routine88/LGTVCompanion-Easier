@@ -297,6 +297,27 @@ APP_DIR() { echo "$APP_HOME/$SUBDIR"; }
 
 run_cli() { ( cd "$(APP_DIR)" && python3 -m lgtv_easy "$@" ); }
 
+# ---- desktop integration, once ----------------------------------------------
+# This launcher used to leave nothing behind that anyone could click: no
+# applications-menu entry and no dock icon, so the only route back into the app
+# was to go and find this file again. Ask the app to put itself where a desktop
+# expects to find it.
+#
+# Once, though - not on every launch. Re-pinning at each start would put back an
+# icon the user had deliberately dragged off their dock, and an app that quietly
+# overrules that is one people uninstall. The menu entry's existence is the
+# "already done" marker: the app writes it the first time and never again.
+integrate_desktop() {
+  local entry="${XDG_DATA_HOME:-$HOME/.local/share}/applications/lgtv-companion-easy.desktop"
+  if [ ! -e "$entry" ]; then
+    run_cli dock add --with-desktop-shortcut >/dev/null 2>&1
+    if [ -e "$entry" ]; then
+      log "Added Easy Mode to your applications menu, dock and desktop."
+    fi
+  fi
+  return 0
+}
+
 needs_setup() {
   ! python3 - "$STATE_DIR/config.json" <<'PY' 2>/dev/null
 import json, sys
@@ -445,6 +466,10 @@ main() {
     say "${C_ACC}${RULE}${C_RESET}"
     say ""
   fi
+
+  # Not under --supervise: that is the detached background re-invocation, and
+  # the run that spawned it has already been through here.
+  [ "${1:-}" = "--supervise" ] || integrate_desktop
 
   case "${1:-}" in
     --setup)

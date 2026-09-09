@@ -211,3 +211,39 @@ def test_windows_supervisor_does_not_redirect_both_streams_to_one_file():
         assert err != out, (
             "Start-Process redirects stdout and stderr to the same file "
             f"({err}); PowerShell forbids this and the supervisor will crash.")
+
+
+# ----- desktop integration ----------------------------------------------------
+def test_both_launchers_put_the_app_somewhere_clickable():
+    """The portable launchers used to leave nothing behind that anyone could
+    click: no menu entry, no dock or Quick Launch icon, nothing on the desktop.
+    The only way back into the app was to find the launcher file again."""
+    for path in (LINUX_SH, WIN_PS1):
+        text = _read(path)
+        assert "dock" in text and "--with-desktop-shortcut" in text, (
+            f"{os.path.basename(path)} never asks the app to add its shortcuts")
+
+
+def test_desktop_integration_happens_once_not_on_every_launch():
+    """Re-pinning at every start would put back an icon the user had
+    deliberately removed. Both launchers test for an existing shortcut first and
+    do nothing when it is there."""
+    sh = _read(LINUX_SH)
+    body = sh.split("integrate_desktop() {")[1].split("\n}")[0]
+    assert "-e \"$entry\"" in body, "the Linux launcher re-pins unconditionally"
+    assert "dock add" in body
+
+    ps1 = _read(WIN_PS1)
+    body = ps1.split("function Add-DesktopIntegration {")[1].split("\n}")[0]
+    assert "if (Test-Path $link) { return }" in body, \
+        "the Windows launcher re-creates the shortcut on every run"
+
+
+def test_the_detached_supervisor_does_not_redo_the_integration():
+    """--supervise/-Supervise is the same script re-invoked in the background;
+    the run that spawned it has already done this."""
+    sh = _read(LINUX_SH)
+    assert '[ "${1:-}" = "--supervise" ] || integrate_desktop' in sh
+    ps1 = _read(WIN_PS1)
+    body = ps1.split("function Add-DesktopIntegration {")[1].split("\n}")[0]
+    assert "if ($Supervise) { return }" in body

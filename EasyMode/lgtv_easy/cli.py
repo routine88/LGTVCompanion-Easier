@@ -677,6 +677,34 @@ def cmd_autostart(args) -> int:
     return 0
 
 
+def cmd_dock(args) -> int:
+    """Put the app on the launcher bar (the dock, or Quick Launch on Windows).
+
+    The installers call this; it is a command of its own because the icon can go
+    missing for reasons that have nothing to do with installing - a shell reset,
+    a dock the user cleared out - and re-running the installer to get it back is
+    a silly answer.
+    """
+    from . import dock
+    action = getattr(args, "action", None) or "status"
+    if action == "add":
+        _print(f"Launcher bar: {dock.add()}")
+        # Only the portable launchers ask for this. The installers write their
+        # own desktop shortcut - they know what they just laid down - and doing
+        # it here as well would leave two icons side by side.
+        if getattr(args, "with_desktop_shortcut", False):
+            placed = dock.ensure_desktop_shortcut()
+            _print(f"Desktop shortcut: {placed or 'could not be created'}")
+        # Failing to pin is not worth a non-zero exit - the app is installed and
+        # in the menu either way - but the caller still deserves to know.
+        return 0 if dock.is_pinned() else 1
+    if action == "remove":
+        _print(f"Launcher bar: {dock.set_pinned(False)}")
+        return 0
+    _print(f"Launcher bar: {dock.status()}")
+    return 0
+
+
 def cmd_gui(args) -> int:
     """Open the graphical control panel (the everyday front door).
 
@@ -794,6 +822,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Windows: 'startup' folder (default) or 'task' "
                         "(Task Scheduler, for locked-down Startup folders)")
     s.set_defaults(func=cmd_autostart)
+
+    s = sub.add_parser("dock", help="show the app on the dock / Quick Launch bar")
+    s.add_argument("action", nargs="?", choices=["add", "remove", "status"],
+                   default="status")
+    s.add_argument("--with-desktop-shortcut", action="store_true",
+                   help="also put a shortcut on the desktop (the portable "
+                        "launchers use this; the installers do it themselves)")
+    s.set_defaults(func=cmd_dock)
     return p
 
 
