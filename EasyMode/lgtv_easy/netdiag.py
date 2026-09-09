@@ -20,28 +20,89 @@ from . import proc
 WEBOS_PORTS = (3000, 3001)
 
 
+def _default_route_ipv4() -> str:
+    """The address this PC would use to reach the internet, or "".
+
+    A UDP "connect" only sets the route; it sends nothing.
+    """
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.connect(("8.8.8.8", 80))
+            return sock.getsockname()[0]
+        finally:
+            sock.close()
+    except OSError:
+        return ""
+
+
+# SIOCGIFADDR from <bits/ioctls.h>. Linux-only: the BSDs and macOS number their
+# ioctls differently, and asking them this one would read the wrong struct.
+_SIOCGIFADDR = 0x8915
+
+
+def _interface_ipv4s() -> "set[str]":
+    """Every interface's IPv4 address, asked of the kernel directly (Linux).
+
+    This is the only method that sees an interface which is neither the default
+    route nor whatever the hostname resolves to - and on a machine with a VPN up,
+    the LAN interface is exactly that. Empty set anywhere it cannot be done.
+    """
+    if not sys.platform.startswith("linux"):
+        return set()
+    try:
+        import fcntl
+        import struct
+    except ImportError:                      # not a POSIX build
+        return set()
+    try:
+        names = [name for _index, name in socket.if_nameindex()]
+    except (AttributeError, OSError):
+        return set()
+    found = set()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError:
+        return set()
+    try:
+        for name in names:
+            try:
+                packed = fcntl.ioctl(
+                    sock.fileno(), _SIOCGIFADDR,
+                    struct.pack("256s", name.encode("utf-8")[:15]))
+                found.add(socket.inet_ntoa(packed[20:24]))
+            except OSError:
+                continue                     # no IPv4 on this interface
+    finally:
+        sock.close()
+    return found
+
+
 def local_ipv4s() -> List[str]:
-    """Return this PC's usable IPv4 addresses (one per active interface).
+    """Return this PC's usable IPv4 addresses, most-likely-useful first.
 
     Beginners on a desktop often have several interfaces (e.g. a wired Ethernet
     link plus Wi-Fi). Knowing them all lets discovery send its search out of each
-    one, and lets the diagnostics tell the user which network the PC is actually
-    on - the single most common reason a TV "can't be found" is the PC and TV
-    being on different subnets.
+    one, lets the ARP sweep cover the right subnet, and lets the diagnostics tell
+    the user which network the PC is actually on - the single most common reason
+    a TV "can't be found" is the PC and TV being on different subnets.
+
+    Three sources, because no one of them is complete:
+
+    * the default route - the best single answer, and first in the list;
+    * every interface the kernel knows about (Linux) - the one that matters when
+      a VPN or a container bridge owns the default route, because then the LAN
+      interface the TV is actually on appears in *no* other source. Without it,
+      a machine with a VPN up searched only the tunnel and could never find its
+      own TV, however long it looked;
+    * whatever the hostname resolves to - which is how Windows reports its NICs,
+      and on Linux is usually just 127.0.1.1.
     """
     ips = set()
-    # The address used to reach the internet is the most reliable single answer
-    # (a UDP "connect" only sets the route; it sends nothing).
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.connect(("8.8.8.8", 80))
-            ips.add(s.getsockname()[0])
-        finally:
-            s.close()
-    except OSError:
-        pass
-    # Everything the hostname resolves to catches additional NICs (Wi-Fi etc.).
+    primary = _default_route_ipv4()
+    if primary:
+        ips.add(primary)
+    ips |= _interface_ipv4s()
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
             ips.add(info[4][0])
@@ -52,7 +113,10 @@ def local_ipv4s() -> List[str]:
         if ip and not ip.startswith("127.") and not ip.startswith("169.254.")
         and ip != "0.0.0.0"
     ]
-    return sorted(usable)
+    # The default route first - it is the answer most likely to be the one the
+    # user means - then the rest in a stable order.
+    usable.sort(key=lambda ip: (ip != primary, ip))
+    return usable
 
 
 def tcp_probe(host: str, port: int, timeout: float = 2.0) -> Tuple[bool, str]:

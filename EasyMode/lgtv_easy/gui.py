@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import messagebox, ttk
@@ -520,6 +521,59 @@ def make_no_tv_banner(parent: tk.Misc, reason: str, on_setup=None):
     return card
 
 
+def make_diagnosis_banner(parent: tk.Misc, diagnosis, on_repair=None,
+                          on_setup=None):
+    """A red card carrying what the watcher worked out while nobody was looking.
+
+    The watcher does its diagnosing in the background, usually overnight, and the
+    user's next move is to open this window. Without this they would be met by a
+    status line that says nothing and would be no wiser than before - which is
+    precisely the complaint this whole feature answers.
+
+    Returns the frame (already packed), or None when the verdict is not worth
+    showing: a TV that was merely switched off is not a fault, and a banner that
+    cries wolf every morning is a banner people stop reading.
+    """
+    from . import selfheal
+    if diagnosis is None or diagnosis.ok:
+        return None
+    if not diagnosis.needs_user:
+        return None
+    when = ""
+    if diagnosis.at:
+        try:
+            when = time.strftime("%a %d %b, %H:%M", time.localtime(diagnosis.at))
+        except (ValueError, OSError):
+            when = ""
+    card = ttk.Frame(parent, style="Danger.TFrame", padding=PAD)
+    card.pack(fill="x", pady=(0, PAD - 4))
+    head = ttk.Frame(card, style="Danger.TFrame")
+    head.pack(fill="x")
+    dot = tk.Canvas(head, width=12, height=12, highlightthickness=0, bd=0,
+                    bg=THEME["danger_bg"])
+    dot.create_oval(1, 1, 11, 11, fill=THEME["danger"], outline=THEME["danger"])
+    dot.pack(side="left", padx=(0, 8), pady=(4, 0), anchor="n")
+    ttk.Label(head, text="Easy Mode could not reach your TV",
+              style="DangerTitle.TLabel").pack(side="left", anchor="w")
+    ttk.Label(card, text=diagnosis.summary, style="DangerBody.TLabel",
+              wraplength=420, justify="left").pack(anchor="w", pady=(6, 0))
+    if when:
+        ttk.Label(card, text=f"Checked automatically {when}.",
+                  style="DangerMuted.TLabel", wraplength=420,
+                  justify="left").pack(anchor="w", pady=(4, 0))
+    row = ttk.Frame(card, style="Danger.TFrame")
+    row.pack(anchor="w", pady=(PAD - 2, 0))
+    if on_repair is not None:
+        ttk.Button(row, text="Test and repair", style="Danger.TButton",
+                   command=on_repair).pack(side="left")
+    # Re-pairing is the one fault the repair pass cannot fix by itself, so that
+    # verdict gets the button that can.
+    if on_setup is not None and diagnosis.verdict == selfheal.VERDICT_PAIRING:
+        ttk.Button(row, text="Re-run setup", style="DangerGhost.TButton",
+                   command=on_setup).pack(side="left", padx=(8, 0))
+    return card
+
+
 def show_no_tv_alert(reason: str, dismiss_after: float = 300.0) -> None:
     """Standalone red warning window, for when there is no console to print to.
 
@@ -799,6 +853,9 @@ class App(tk.Tk):
             self._lock = None  # someone else owns the watcher; don't compete
             return
         self.daemon = Daemon(self.cfg)
+        # A window is already open in front of the user, so the watcher's
+        # self-check must not open a second one at them.
+        self.daemon.has_ui = True
         self.daemon.start()
 
     def watcher_holder(self):
@@ -1157,6 +1214,14 @@ class SettingsPanel(ttk.Frame):
         reason = cfg.unconfigured_reason()
         if reason is not None:
             make_no_tv_banner(self, reason, on_setup=self.app.show_wizard)
+        else:
+            # A TV *is* set up, but the watcher may have concluded it cannot be
+            # reached while this window was closed. Say so here rather than let
+            # the user discover it the way they did last time: by noticing the
+            # screen never sleeps.
+            self._diagnosis_banner = make_diagnosis_banner(
+                self, self._last_diagnosis(), on_repair=self._test,
+                on_setup=self.app.show_wizard)
 
         # Compact "connected to" line instead of a whole card. Kept on the panel
         # so the startup self-test / repair can update the address if the TV moved.
@@ -1448,6 +1513,31 @@ class SettingsPanel(ttk.Frame):
             text=f"Idle-sleep is {state}, after {fmt_timeout(cfg.idle_minutes * 60)}."
                  f"{deep}{who} Idle detection: {backend}.{warn}")
 
+    def _last_diagnosis(self):
+        """What the watcher last concluded while this window was closed, if
+        anything. Best-effort: a missing or unreadable file just means no news."""
+        try:
+            from . import selfheal
+            return selfheal.load_diagnosis()
+        except Exception:  # noqa: BLE001 - never stop the panel building
+            return None
+
+    def _clear_diagnosis_banner(self):
+        """Take the red card down - the fault it describes has just been fixed."""
+        banner = getattr(self, "_diagnosis_banner", None)
+        if banner is None:
+            return
+        self._diagnosis_banner = None
+        try:
+            banner.destroy()
+        except tk.TclError:
+            pass
+        try:
+            from . import selfheal
+            selfheal.clear_diagnosis()
+        except Exception:  # noqa: BLE001
+            pass
+
     def _test(self):
         cfg = self.app.cfg
         self.status.config(text="Testing: turning your screen off, then on…")
@@ -1482,6 +1572,10 @@ class SettingsPanel(ttk.Frame):
 
     def _test_done(self, ok, err, showing=None):
         if ok:
+            # The TV answered, so whatever the watcher concluded overnight is
+            # history; leaving the red card up would be the app arguing with
+            # what the user just watched happen.
+            self._clear_diagnosis_banner()
             # cfg.device.ip may have just been corrected by the recovery step.
             self._refresh_conn_label()
             from .webos import input_label

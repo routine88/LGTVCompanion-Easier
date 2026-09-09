@@ -21,6 +21,7 @@ from typing import Callable, Optional
 
 from . import idle as idle_mod
 from . import media as media_mod
+from . import proc
 from . import system_sleep
 from .applog import get_logger
 from .config import Config, fmt_timeout
@@ -42,6 +43,17 @@ RESUME_GAP_SECONDS = 30.0
 # with one identical warning per poll, forever. Instead back off exponentially from
 # the poll interval up to this cap, and log the failure only once until it recovers.
 RECONNECT_BACKOFF_MAX = 300.0  # seconds (5 min between attempts at most)
+
+# How long the TV must be *continuously* unreachable before the watcher stops
+# retrying quietly and works out why. Two minutes is well past every ordinary
+# blip - a TV reboot, a Wi-Fi roam, a firmware update - and well short of the
+# user giving up on the app. Before this existed the answer was "never": the
+# watcher retried a dead address every five minutes for days and said nothing
+# past the first line in a log nobody opens.
+DIAGNOSE_AFTER_SECONDS = 120.0
+# ...and how often to ask again while the same outage continues. Long, because
+# the answer rarely changes and each check sweeps the LAN.
+DIAGNOSE_REPEAT_SECONDS = 1800.0
 
 # How long to keep trying to wake a fully-powered-off TV (with Wake-on-LAN) on
 # user activity before concluding WoL can't reach it on this network - e.g. a
@@ -135,6 +147,18 @@ class Daemon:
         # strand it forever if WoL can't reach it. None = not currently failing.
         self._standby_wake_since: Optional[float] = None
         self._gave_up_deep_wake = False
+        # Self-diagnosis state. _failing_since is when the current outage began
+        # (None whenever the TV is reachable), which is what lets the watchdog
+        # tell a blip from an outage worth investigating.
+        self._failing_since: Optional[float] = None
+        self._next_diagnosis_at = 0.0
+        self._diagnosing = False
+        self._escalated = False          # already interrupted the user this outage?
+        self.diagnoses = 0               # self-checks run (observable)
+        self.last_diagnosis = None       # selfheal.Diagnosis, or None
+        # Set by the GUI when it owns this daemon: there is already a window in
+        # front of the user, so opening a second one at them would be absurd.
+        self.has_ui = False
         # Set once the OS shutdown handler has (attempted to) power the TV off, so
         # the CLI's SIGTERM fallback doesn't fire a second, redundant power-off.
         self._shutdown_handled = False
@@ -242,6 +266,7 @@ class Daemon:
         self._connect_failures = 0
         self._connect_warned = False
         self._next_connect_at = 0.0
+        self._end_outage()
         self._client = client
         return client
 
@@ -296,6 +321,10 @@ class Daemon:
         backoff (capped at RECONNECT_BACKOFF_MAX) and log the outage only once,
         so an off TV doesn't flood the log with one identical line per poll."""
         self._connect_failures += 1
+        if self._failing_since is None:
+            # First failure of a new outage: start the clock the watchdog reads.
+            self._failing_since = self._clock()
+            self._next_diagnosis_at = self._failing_since + DIAGNOSE_AFTER_SECONDS
         base = max(self.config.poll_seconds, 1.0)
         # 1st failure -> base interval, doubling each time up to the cap.
         delay = min(RECONNECT_BACKOFF_MAX,
@@ -310,6 +339,114 @@ class Daemon:
         else:
             self.logger.debug("TV still unreachable (%s); next attempt in ~%.0fs.",
                               exc, delay)
+
+    def _end_outage(self) -> None:
+        """The TV is answering again: stand the watchdog down.
+
+        Also clears the recorded verdict, so the next window the user opens does
+        not greet them with a problem that fixed itself an hour ago.
+        """
+        if self._failing_since is None:
+            return
+        self._failing_since = None
+        self._next_diagnosis_at = 0.0
+        self._escalated = False
+        if self.last_diagnosis is not None:
+            self.logger.info("The TV is reachable again.")
+            self.last_diagnosis = None
+            try:
+                from . import selfheal
+                selfheal.clear_diagnosis()
+            except Exception:  # noqa: BLE001 - best effort
+                pass
+
+    def _maybe_diagnose(self) -> None:
+        """Once an outage has lasted long enough, go and find out why.
+
+        Called from the poll loop, but the check itself runs on its own thread:
+        it sweeps the LAN and waits on TCP timeouts, and the loop it was called
+        from is the one that has to keep the screen awake meanwhile.
+        """
+        if self._diagnosing or self._failing_since is None:
+            return
+        now = self._clock()
+        if now < self._next_diagnosis_at:
+            return
+        self._next_diagnosis_at = now + DIAGNOSE_REPEAT_SECONDS
+        self._diagnosing = True
+        threading.Thread(target=self._diagnose_now, daemon=True,
+                         name="lgtv-easy-diagnose").start()
+
+    def _diagnose_now(self) -> None:
+        """Run one self-check and act on the verdict. Never raises."""
+        from . import selfheal
+        try:
+            began = self._failing_since
+            minutes = (self._clock() - began) / 60.0 if began else 0.0
+            self.logger.warning(
+                "No contact with the TV for %.0f minutes - running a self-check "
+                "to find out why.", minutes)
+            diagnosis = selfheal.diagnose(
+                self.config,
+                log=lambda msg: self.logger.debug("self-check: %s", msg))
+            self.last_diagnosis = diagnosis
+            selfheal.save_diagnosis(diagnosis)
+            self.diagnoses += 1
+            if diagnosis.ok:
+                # The check found the TV (usually at a new address) and has
+                # already persisted the fix - so let the next poll connect
+                # straight away instead of sitting out the backoff it inherited.
+                self.logger.info("Self-check fixed it: %s", diagnosis.summary)
+                self._drop_client()
+                self._connect_failures = 0
+                self._connect_warned = False
+                self._next_connect_at = 0.0
+                self._end_outage()
+                return
+            self.logger.warning("Self-check: %s", diagnosis.summary)
+            self._escalate(diagnosis)
+        except Exception:  # noqa: BLE001 - a self-check must never kill the watcher
+            self.logger.exception("The self-check hit an unexpected problem")
+        finally:
+            self._diagnosing = False
+
+    def _escalate(self, diagnosis) -> None:
+        """Interrupt the user - once per outage - but only when waiting cannot help.
+
+        A TV that is switched off is the normal overnight state and gets nothing.
+        A cleared pairing, a PC on the wrong network or a PC with no network at
+        all will still be broken tomorrow, so those are worth a notification; a
+        cleared pairing is the one the user can only fix in the setup window, so
+        that one opens it.
+        """
+        from . import notify
+        from . import selfheal
+        if not diagnosis.needs_user or self._escalated:
+            return
+        self._escalated = True
+        notify.notify("Easy Mode can't reach your TV", diagnosis.summary,
+                      urgency="critical")
+        if diagnosis.verdict == selfheal.VERDICT_PAIRING:
+            self._open_setup()
+
+    def _open_setup(self) -> None:
+        """Put the setup window in front of the user. Never raises.
+
+        Skipped when a window is already open (the GUI owns this daemon), when
+        there is no desktop to open it on, and when the tests say so - none of
+        which should stop the notification that has already gone out.
+        """
+        from . import branding
+        from . import notify
+        if self.has_ui or not notify.have_desktop():
+            return
+        if os.environ.get("LGTV_EASY_NO_AUTO_SETUP") == "1":
+            return
+        try:
+            proc.popen(branding.launch_command("gui", windowed=True))
+            self.logger.info("Opened the setup window: the TV needs re-pairing.")
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("Could not open the setup window: %s", exc)
 
     def _drop_client(self) -> None:
         if self._client:
@@ -930,6 +1067,7 @@ class Daemon:
                 except Exception as exc:  # noqa: BLE001 - never let the loop die
                     self.last_error = f"tick: {exc}"
                     self.logger.exception("Unexpected error in daemon loop")
+                self._maybe_diagnose()
                 self._sleep_fn(self.config.poll_seconds)
                 # A wall-clock gap far beyond our poll interval means the process
                 # was frozen while the machine slept and has now resumed. The OS

@@ -317,3 +317,157 @@ def _failure_summary(cfg, saved, pc_ips, saved_reachable, found_ip, res) -> str:
             "deep standby, or on a different Wi-Fi. Switch it on and make sure its "
             "network control setting (LG Connect Apps / 'Mobile TV On') is enabled, "
             "then try again.")
+
+
+# ----- unattended self-diagnosis ---------------------------------------------
+# :func:`repair` above answers "what is wrong and can I fix it" for a person who
+# is sitting in front of the app and pressed a button. :func:`diagnose` asks the
+# same question on the watcher's behalf, with nobody watching, and adds the one
+# thing a background caller needs and a person does not: a machine-readable
+# verdict, so the daemon can decide between "say nothing, the TV is just off"
+# and "interrupt the user, this will not fix itself".
+VERDICT_OK = "ok"                        # reachable; nothing was wrong
+VERDICT_RECOVERED = "recovered"          # was broken, we fixed it (usually a new IP)
+VERDICT_TV_OFF = "tv-off"                # nothing answers and nothing is wrong here
+VERDICT_PAIRING = "pairing"              # the TV answers but refuses us
+VERDICT_NO_NETWORK = "no-network"        # this PC is not on any network
+VERDICT_WRONG_NETWORK = "wrong-network"  # PC and TV are on different subnets
+
+# The verdicts that will not improve on their own, however long we wait.
+NEEDS_USER = (VERDICT_PAIRING, VERDICT_NO_NETWORK, VERDICT_WRONG_NETWORK)
+
+
+@dataclass
+class Diagnosis:
+    """What the watcher concluded, and whether it needs a human.
+
+    ``verdict`` is for code, ``summary`` is for the user, and ``steps`` is the
+    full transcript so a report can be pasted somewhere useful.
+    """
+
+    verdict: str = VERDICT_TV_OFF
+    summary: str = ""
+    old_ip: str = ""
+    new_ip: str = ""
+    steps: List[str] = field(default_factory=list)
+    at: float = 0.0                      # wall-clock time.time(), for display
+
+    @property
+    def needs_user(self) -> bool:
+        return self.verdict in NEEDS_USER
+
+    @property
+    def ok(self) -> bool:
+        return self.verdict in (VERDICT_OK, VERDICT_RECOVERED)
+
+    def to_dict(self) -> dict:
+        return {"verdict": self.verdict, "summary": self.summary,
+                "old_ip": self.old_ip, "new_ip": self.new_ip,
+                "steps": list(self.steps), "at": self.at}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Diagnosis":
+        return cls(verdict=str(data.get("verdict") or VERDICT_TV_OFF),
+                   summary=str(data.get("summary") or ""),
+                   old_ip=str(data.get("old_ip") or ""),
+                   new_ip=str(data.get("new_ip") or ""),
+                   steps=[str(s) for s in (data.get("steps") or [])],
+                   at=float(data.get("at") or 0.0))
+
+
+def _classify(cfg: Config, res: RepairResult) -> str:
+    """Turn a repair outcome into one of the verdicts above.
+
+    Order matters: the checks run from "definitely not the TV's fault" outwards,
+    so a PC with no network at all is never reported as a TV that is switched
+    off - which is the wrong advice, and the advice the old code gave.
+    """
+    if res.ok:
+        return VERDICT_RECOVERED if res.repaired else VERDICT_OK
+    pc_ips = netdiag.local_ipv4s()
+    if not pc_ips:
+        return VERDICT_NO_NETWORK
+    if res.error and _looks_like_pairing_problem(Exception(res.error)):
+        return VERDICT_PAIRING
+    saved = _host(cfg.device.ip)
+    if saved:
+        note = netdiag.same_subnet_guess(pc_ips, saved)
+        if note and "WARNING" in note:
+            return VERDICT_WRONG_NETWORK
+    return VERDICT_TV_OFF
+
+
+def diagnose(cfg: Config, *, log: Optional[Callable[[str], None]] = None,
+             discover_timeout: float = 3.0,
+             connect_timeout: float = 6.0) -> Diagnosis:
+    """Work out why the TV is unreachable, fix what can be fixed, and say which.
+
+    Runs :func:`repair` in its unattended mode - ``allow_guess=False`` so an
+    unidentified TV is never contacted (adopting the wrong one puts a pairing
+    prompt on a stranger's screen), no blink, no client handed back - and then
+    classifies the outcome. Never raises.
+    """
+    res = repair(cfg, log=log, persist=True, connect=False, blink=False,
+                 on_prompt=None, allow_guess=False,
+                 discover_timeout=discover_timeout,
+                 connect_timeout=connect_timeout)
+    verdict = _classify(cfg, res)
+    summary = res.summary or ("The TV is reachable." if res.ok else
+                              "Could not reach the TV.")
+    if verdict == VERDICT_TV_OFF and not res.ok:
+        # The generic "couldn't find your TV" line is right, but the watcher is
+        # allowed to be calmer about it than a person who just pressed a button:
+        # a TV that is off is the normal overnight state, not a fault.
+        summary = ("Your TV isn't answering on the network. That's normal when "
+                   "it is switched off at the wall or in deep standby - the "
+                   "watcher will pick it up again by itself when it comes back.")
+    return Diagnosis(verdict=verdict, summary=summary,
+                     old_ip=res.old_ip, new_ip=res.new_ip,
+                     steps=list(res.steps), at=time.time())
+
+
+# ----- remembering the last verdict ------------------------------------------
+# The watcher usually reaches its conclusion while no window is open, and the
+# user's next move is to open one. Without this, the app that just spent five
+# minutes working out exactly what was wrong greets them with a blank status
+# line and they are no better off than before.
+DIAGNOSIS_FILE = "last-diagnosis.json"
+
+
+def diagnosis_path() -> str:
+    from .config import config_dir
+    import os.path
+    return os.path.join(config_dir(), DIAGNOSIS_FILE)
+
+
+def save_diagnosis(diagnosis: Diagnosis) -> bool:
+    """Record the latest verdict for the GUI to pick up. Never raises."""
+    import json
+    import os
+    path = diagnosis_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(diagnosis.to_dict(), fh, indent=2)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def load_diagnosis() -> Optional[Diagnosis]:
+    """The last recorded verdict, or None if there isn't one."""
+    import json
+    try:
+        with open(diagnosis_path(), "r", encoding="utf-8") as fh:
+            return Diagnosis.from_dict(json.load(fh))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def clear_diagnosis() -> None:
+    """Forget the last verdict - the TV is fine again. Never raises."""
+    import os
+    try:
+        os.unlink(diagnosis_path())
+    except OSError:
+        pass

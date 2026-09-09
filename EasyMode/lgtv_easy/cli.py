@@ -328,6 +328,18 @@ def cmd_status(args) -> int:
     from .singleton import SingleInstance
     holder = SingleInstance("daemon").holder()
     _print(f"  Watcher     : {'RUNNING (pid ' + str(holder) + ')' if holder else 'NOT running'}")
+    # What the watcher concluded on its own, if anything. This is the line that
+    # answers "it stopped working and I have no idea why" without reading a log.
+    from . import selfheal
+    diagnosis = selfheal.load_diagnosis()
+    if diagnosis is not None and not diagnosis.ok:
+        import time as _time
+        when = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(diagnosis.at)) \
+            if diagnosis.at else "recently"
+        _print(f"  Self-check  : {when} - {diagnosis.summary}")
+        if diagnosis.needs_user:
+            _print("      ^ this will not fix itself. Run 'lgtv-easy repair', or "
+                   "open the app and press \u201cTest and repair\u201d.")
     return 0
 
 

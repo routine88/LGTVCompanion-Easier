@@ -183,3 +183,57 @@ def test_wizard_cancels_cleanly_when_user_declines_retry(tmp_path, monkeypatch):
     )
     assert rc == 1
     assert "Setup not completed" in "\n".join(transcript)
+
+
+# ----- which interfaces we look on -------------------------------------------
+# The bug these were written for: on a machine with a VPN up, the default route
+# was the tunnel and the hostname resolved to 127.0.1.1, so the LAN interface the
+# TV was actually on appeared in *no* source at all. Discovery searched only the
+# tunnel, the ARP sweep swept only the tunnel's /24, and the subnet diagnostic
+# reported the wrong network - so the automatic "the TV moved, find it again"
+# recovery could never work, however long it ran.
+def test_local_ips_include_interfaces_the_default_route_never_mentions(monkeypatch):
+    import socket as socket_mod
+
+    from lgtv_easy import netdiag
+
+    monkeypatch.setattr(netdiag, "_default_route_ipv4", lambda: "10.80.0.46")
+    monkeypatch.setattr(netdiag, "_interface_ipv4s",
+                        lambda: {"10.80.0.46", "192.168.86.21", "127.0.0.1"})
+    monkeypatch.setattr(netdiag.socket, "getaddrinfo",
+                        lambda *a, **k: [(0, 0, 0, "", ("127.0.1.1", 0))])
+    assert socket_mod  # imported for clarity about what is being replaced
+
+    ips = netdiag.local_ipv4s()
+    assert "192.168.86.21" in ips, (
+        "the LAN interface must be searched even when a VPN owns the default route")
+    assert ips[0] == "10.80.0.46", "the default route is still the best first guess"
+    assert not any(ip.startswith("127.") for ip in ips), "loopback is not a network"
+
+
+def test_local_ips_survive_every_source_failing(monkeypatch):
+    from lgtv_easy import netdiag
+
+    monkeypatch.setattr(netdiag, "_default_route_ipv4", lambda: "")
+    monkeypatch.setattr(netdiag, "_interface_ipv4s", lambda: set())
+    monkeypatch.setattr(netdiag.socket, "getaddrinfo",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("no dns")))
+    assert netdiag.local_ipv4s() == []
+
+
+def test_the_kernel_interface_list_agrees_with_the_default_route():
+    """On a real Linux machine the ioctl sweep must at least see the interface
+    the default route goes out of - if it does not, the sweep is not working and
+    the VPN bug is back with nothing to catch it."""
+    import sys
+
+    import pytest as _pytest
+
+    from lgtv_easy import netdiag
+
+    if not sys.platform.startswith("linux"):
+        _pytest.skip("the ioctl sweep is Linux-only")
+    primary = netdiag._default_route_ipv4()
+    if not primary:
+        _pytest.skip("this machine has no default route")
+    assert primary in netdiag._interface_ipv4s()
