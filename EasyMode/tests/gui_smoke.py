@@ -45,7 +45,8 @@ def main():
     tv = MockTV(require_pairing=True).start()
 
     # Point discovery and the client at the mock TV.
-    gui.discover_tvs = lambda *a, **k: [Discovered(ip="127.0.0.1", name="LG B-series")]
+    gui.discover_tvs = lambda *a, **k: [
+        Discovered(ip="127.0.0.1", name="LG B-series", is_lg=True)]
 
     orig_client = gui.WebOSClient
 
@@ -63,9 +64,19 @@ def main():
     assert isinstance(wizard, gui.SetupWizard), "wizard shown on first run"
     print("[gui] Wizard step 1 rendered:", wizard.winfo_children()[0].cget("text"))
 
-    # Step 1: select discovered TV and continue.
-    wizard.found = [Discovered(ip="127.0.0.1", name="LG B-series")]
-    wizard.selected_ip.set("127.0.0.1")
+    # Step 1: "Next" must be dead until the scan actually produces a TV, and the
+    # wizard scans by itself - nobody should have to find a button to start it.
+    assert "disabled" in wizard.next_btn.state(), \
+        "Next was live before any TV had been found"
+    for _ in range(100):
+        pump(app)
+        if wizard.found:
+            break
+    assert wizard.found, "the wizard never scanned on its own"
+    assert "disabled" not in wizard.next_btn.state(), \
+        "Next stayed dead after a TV was found"
+    assert wizard.selected_ip.get() == "127.0.0.1", "the found TV was not selected"
+    print("[gui] Step 1 gated Next until a TV was found. \u2713")
     wizard._goto_pair()
     pump(app)
     print("[gui] Advanced to pairing; waiting for mock pairing...")

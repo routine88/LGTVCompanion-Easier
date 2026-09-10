@@ -34,7 +34,7 @@ from .daemon import Daemon
 from . import dock as dock_mod
 from . import idle as idle_mod
 from . import media as media_mod
-from .discovery import discover_tvs
+from .discovery import Discovered, discover_tvs
 from .netdiag import probe_tv, subnet_report
 from .webos import WebOSClient, pair_with_fallback
 
@@ -989,16 +989,22 @@ class SetupWizard(ttk.Frame):
                                   highlightcolor=THEME["accent"],
                                   font=(THEME["ui"], 10), activestyle="none")
         self.listbox.pack(fill="x")
+        # Choosing a different TV in the list is the other way to arm "Next".
+        self.listbox.bind("<<ListboxSelect>>", lambda _e: self._sync_selection())
         self.scan_status = ttk.Label(card, text="", style="CardMuted.TLabel")
         self.scan_status.pack(anchor="w", pady=(8, 0))
 
         row = ttk.Frame(card, style="Card.TFrame")
         row.pack(fill="x", pady=(PAD, 0))
-        ttk.Button(row, text="Scan for TVs", command=self._scan).pack(side="left")
+        self.scan_btn = ttk.Button(row, text="Scan again", command=self._scan)
+        self.scan_btn.pack(side="left")
         ttk.Label(row, text="or type the IP:", style="CardMuted.TLabel").pack(
             side="left", padx=(10, 6))
-        ttk.Entry(row, textvariable=self.selected_ip, width=16).pack(
-            side="left", fill="x", expand=True)
+        entry = ttk.Entry(row, textvariable=self.selected_ip, width=16)
+        entry.pack(side="left", fill="x", expand=True)
+        entry.bind("<Return>", lambda _e: self._check_typed_ip())
+        ttk.Button(row, text="Check", command=self._check_typed_ip).pack(
+            side="left", padx=(6, 0))
 
         ttk.Label(self, text="Details", style="Sub.TLabel").pack(anchor="w")
         self.diag = self._make_diag(height=5)
@@ -1007,13 +1013,56 @@ class SetupWizard(ttk.Frame):
         threading.Thread(target=lambda: subnet_report("", self.diag),
                          daemon=True).start()
 
-        ttk.Button(self, text="Next  →", style="Accent.TButton",
-                   command=self._goto_pair).pack(side="bottom", anchor="e",
-                                                 pady=(PAD, 0))
+        # Starts disabled, and stays that way until a TV is actually in the list.
+        # Letting someone press Next with nothing found sends them into a pairing
+        # step that can only fail - or, worse, onward with a half-filled config -
+        # and the failure surfaces two screens later where it explains nothing.
+        self.next_btn = ttk.Button(self, text="Next  →", style="Accent.TButton",
+                                   command=self._goto_pair)
+        self.next_btn.pack(side="bottom", anchor="e", pady=(PAD, 0))
+        self._arm_next(False)
+        # Scan straight away rather than making "Scan for TVs" the first thing
+        # anyone has to find and press: the wizard knows perfectly well what it
+        # needs to do next.
+        self._scan()
+
+    def _arm_next(self, ready: bool) -> None:
+        """Enable "Next" only when there is a real TV to go on to."""
+        try:
+            self.next_btn.state(["!disabled"] if ready else ["disabled"])
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _has_tv(self) -> bool:
+        return bool(self.found) and bool(self.listbox.curselection())
+
+    def _sync_selection(self) -> None:
+        """Copy the highlighted row into the fields step 2 reads."""
+        sel = self.listbox.curselection()
+        if sel and 0 <= sel[0] < len(self.found):
+            dev = self.found[sel[0]]
+            self.selected_ip.set(dev.ip)
+            self.selected_name.set(dev.name)
+        self._arm_next(self._has_tv())
+
+    def _busy(self, message: str) -> None:
+        self.scan_status.config(text=message)
+        self._arm_next(False)
+        try:
+            self.scan_btn.state(["disabled"])
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _idle(self) -> None:
+        try:
+            self.scan_btn.state(["!disabled"])
+        except (AttributeError, tk.TclError):
+            pass
 
     def _scan(self):
-        self.scan_status.config(text="Scanning the network…")
+        self._busy("Looking for your TV…")
         self.listbox.delete(0, tk.END)
+        self.found = []
 
         def worker():
             results = discover_tvs(log=self.diag)
@@ -1022,25 +1071,76 @@ class SetupWizard(ttk.Frame):
         threading.Thread(target=worker, daemon=True).start()
 
     def _scan_done(self, results):
-        self.found = results
-        if not results:
+        self._idle()
+        # Only actual LG TVs are offered. discover_tvs also reports the other
+        # UPnP gadgets that answered, and listing a printer as something to pair
+        # with is how a wizard talks somebody into the wrong choice.
+        self.found = [d for d in results if d.is_lg]
+        if not self.found:
+            others = (f" ({len(results)} other device(s) answered, none of them "
+                      "an LG TV.)" if results else "")
             self.scan_status.config(
-                text="No TVs found. Type the IP address manually above.")
+                text="No TV found yet. Check the TV is on and joined to the "
+                     "same Wi-Fi as this PC, then Scan again - or type its IP "
+                     "and press Check." + others)
+            self._arm_next(False)
             return
-        for dev in results:
+        for dev in self.found:
             self.listbox.insert(tk.END, f"{dev.name}   ({dev.ip})")
         self.listbox.selection_set(0)
-        self.scan_status.config(text=f"Found {len(results)} TV(s).")
+        self._sync_selection()
+        self.scan_status.config(
+            text=f"Found {len(self.found)} TV(s). Pick yours, then press Next.")
+
+    def _check_typed_ip(self):
+        """Verify a hand-typed address and put it in the list if it is a TV.
+
+        Typing an address is the way in on networks where discovery cannot work
+        (a mesh that blocks multicast, say), but it must not be a way *past* the
+        check: an unverified address just moves the failure to the pairing step.
+        The probe is a WebSocket handshake, so it identifies a webOS TV without
+        registering, and cannot put a prompt on anybody's screen.
+        """
+        ip = self.selected_ip.get().strip()
+        if not ip:
+            self.scan_status.config(text="Type the TV's IP address first.")
+            return
+        self._busy(f"Checking {ip}…")
+
+        def worker():
+            from . import netdiag
+            ok = any(netdiag.speaks_webos(ip, port, timeout=3.0)
+                     for port in netdiag.WEBOS_PORTS)
+            self.app.post(lambda: self._check_done(ip, ok))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _check_done(self, ip, ok):
+        self._idle()
+        if not ok:
+            self.scan_status.config(
+                text=f"Nothing at {ip} answered as an LG TV. Check the address "
+                     "on the TV (Settings > Network), and that it is on the "
+                     "same network as this PC.")
+            self._arm_next(False)
+            return
+        if not any(d.ip == ip for d in self.found):
+            self.found.append(Discovered(ip=ip, name="LG webOS TV", is_lg=True))
+            self.listbox.insert(tk.END, f"LG webOS TV   ({ip})")
+        index = next(i for i, d in enumerate(self.found) if d.ip == ip)
+        self.listbox.selection_clear(0, tk.END)
+        self.listbox.selection_set(index)
+        self._sync_selection()
+        self.scan_status.config(text=f"{ip} answered as an LG TV. Press Next.")
 
     def _goto_pair(self):
-        sel = self.listbox.curselection()
-        if sel and self.found:
-            dev = self.found[sel[0]]
-            self.selected_ip.set(dev.ip)
-            self.selected_name.set(dev.name)
+        # Defence in depth: the button is disabled unless this holds, but the
+        # wizard must never advance on an empty selection however it got here.
+        self._sync_selection()
         if not self.selected_ip.get().strip():
             messagebox.showwarning("Pick a TV",
-                                   "Choose a TV from the list or type its IP.")
+                                   "Choose a TV from the list, or type its IP "
+                                   "and press Check.")
             return
         self._build_step2()
 
