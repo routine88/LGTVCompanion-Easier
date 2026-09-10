@@ -384,6 +384,79 @@ def find_ip_by_mac(mac: str, settle: float = 1.5) -> str:
     return ip_for_mac(target)
 
 
+# ----- is this an LG device? -------------------------------------------------
+# Every OUI the IEEE has registered to LG Electronics or LG Innotek (the
+# subsidiary that makes the Wi-Fi modules inside LG TVs - a TV's MAC is very
+# often an Innotek one rather than an Electronics one). Regenerate with:
+#
+#   grep -iE "\(hex\).*(LG Electronics|LG Innotek)" /usr/share/ieee-data/oui.txt \
+#     | awk '{print tolower($1)}' | tr '-' ':' | sort -u
+#
+# This exists so the app can tell "that is an LG TV" from "that is a Node server
+# on port 3000" *without* connecting to it. Identification must never require a
+# registration, because a registration the TV does not recognise puts a prompt
+# on its screen - see discovery.locate_tv for why that matters.
+LG_OUIS = frozenset([
+    "00:05:c9", "00:1c:62", "00:1e:75", "00:1e:b2", "00:1f:6b",
+    "00:1f:e3", "00:21:fb", "00:22:a9", "00:24:83", "00:25:e5",
+    "00:26:e2", "00:34:da", "00:3d:e8", "00:51:ed", "00:57:c1",
+    "00:aa:70", "00:e0:91", "04:1b:6d", "04:4e:af", "08:d4:6a",
+    "0c:48:85", "10:68:3f", "10:f1:f2", "10:f9:6f", "14:c9:13",
+    "1c:08:c1", "20:17:42", "20:21:a5", "20:3d:bd", "24:e8:53",
+    "28:0f:eb", "2c:2b:f9", "2c:54:cf", "2c:59:8a", "30:0e:b8",
+    "30:76:6f", "30:a9:de", "30:b4:b8", "30:fc:eb", "34:4d:f7",
+    "34:fc:ef", "38:30:f9", "38:8c:50", "3c:bd:d8", "3c:cd:93",
+    "40:2f:86", "40:b0:fa", "44:cb:8b", "48:59:29", "48:60:5f",
+    "48:90:2f", "4c:ba:d7", "4c:bc:e9", "50:55:27", "58:3f:54",
+    "58:a2:b5", "58:fd:b1", "5c:70:a3", "5c:af:06", "60:3c:ee",
+    "60:ab:14", "60:e3:ac", "64:0d:22", "64:89:9a", "64:95:6c",
+    "64:bc:0c", "64:c2:de", "64:cb:e9", "6c:d0:32", "6c:d6:8a",
+    "70:05:14", "74:40:be", "74:a7:22", "74:e6:b8", "78:5d:c8",
+    "78:f8:82", "7c:1c:4e", "7c:f3:1b", "80:5a:04", "80:5b:65",
+    "88:07:4b", "88:36:5f", "88:c9:d0", "8c:3a:e3", "8c:56:46",
+    "94:44:44", "98:93:cc", "98:b8:ba", "98:d6:f7", "a0:39:f7",
+    "a0:4f:85", "a0:6f:aa", "a0:91:69", "a8:16:b2", "a8:23:fe",
+    "a8:92:2c", "a8:b8:6e", "ac:0d:1b", "ac:5a:f0", "ac:f1:08",
+    "ac:f6:f7", "b0:37:95", "b4:b2:91", "b4:e6:2a", "b4:f1:da",
+    "b4:f7:a1", "b8:16:5f", "b8:1d:aa", "bc:f5:ac", "c0:41:f6",
+    "c4:36:6c", "c4:43:8f", "c4:9a:02", "c8:02:10", "c8:08:e9",
+    "c8:f3:19", "cc:2d:8c", "cc:88:26", "cc:fa:00", "d0:13:fd",
+    "d8:4f:b8", "dc:03:98", "dc:0b:34", "e8:5b:5b", "e8:92:a4",
+    "e8:f2:e2", "f0:1c:13", "f8:0c:f3", "f8:38:69", "f8:95:c7",
+    "f8:a9:d0", "f8:b9:5a",
+])
+
+
+def is_lg_mac(mac: str) -> bool:
+    """True when ``mac``'s vendor prefix belongs to LG. Never raises."""
+    canon = canon_mac(mac)
+    return bool(canon) and canon[:8].lower() in LG_OUIS
+
+
+def speaks_webos(ip: str, port: int, timeout: float = 2.0) -> bool:
+    """True when ``ip:port`` completes a WebSocket handshake, as a webOS control
+    port does.
+
+    Strictly the handshake - no SSAP message is sent, so nothing is registered
+    and this can never make a TV show a pairing prompt. It is what separates a
+    real control port from the many other things that listen on port 3000: an
+    ordinary HTTP server refuses the upgrade, and a bare TCP connect (which is
+    all this used to do) cannot tell the difference.
+    """
+    from ._ws import WebSocket
+
+    scheme = "wss" if port == 3001 else "ws"
+    try:
+        ws = WebSocket.connect("%s://%s:%d/" % (scheme, ip, port), timeout=timeout)
+    except Exception:  # noqa: BLE001 - anything but a clean 101 means "no"
+        return False
+    try:
+        ws.close()
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
 def webos_hosts(probe_timeout: float = 0.6) -> "List[str]":
     """Live hosts on the LAN that answer on a WebOS control port.
 
@@ -406,11 +479,42 @@ def webos_hosts(probe_timeout: float = 0.6) -> "List[str]":
     found: List[str] = []
     for ip in live:
         for port in WEBOS_PORTS:
-            ok, _ = tcp_probe(ip, port, timeout=probe_timeout)
-            if ok:
+            # A WebSocket handshake, not a bare TCP connect. Port 3000 is the
+            # most-used development-server port there is, so "something answered"
+            # used to offer the user a Node container and a random appliance as
+            # candidate TVs - and on a mesh network, where SSDP is dead, this
+            # sweep is the *only* way the TV is ever found.
+            if speaks_webos(ip, port, timeout=probe_timeout):
                 found.append(ip)
                 break
     return found
+
+
+def lg_tv_hosts(probe_timeout: float = 1.5) -> "List[tuple]":
+    """Every host on the LAN that is positively an LG webOS TV: ``[(ip, mac)]``.
+
+    Two independent signals, neither of which contacts the TV in a way it could
+    react to: the MAC belongs to LG, and the host completes a WebSocket
+    handshake on a webOS control port. Together they are strong enough to adopt
+    an address on - which matters, because a TV's MAC is *not* the permanent
+    identifier the recovery code once assumed. A TV has one MAC per interface
+    and will present a different one after moving between Wi-Fi and Ethernet, at
+    which point looking it up by the stored MAC can never succeed again.
+    """
+    try:
+        sweep_arp()
+    except Exception:  # noqa: BLE001 - best effort
+        pass
+    out = []
+    seen = set()
+    for ip, mac in arp_table():
+        if ip in seen or not is_lg_mac(mac):
+            continue
+        seen.add(ip)
+        if any(speaks_webos(ip, port, timeout=probe_timeout)
+               for port in WEBOS_PORTS):
+            out.append((ip, canon_mac(mac)))
+    return out
 
 
 def env_summary() -> List[str]:

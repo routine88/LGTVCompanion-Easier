@@ -308,6 +308,21 @@ class Daemon:
         self.logger.info("TV not reachable at %s; found it at %s %s - "
                          "updating the saved address.", old or "(unset)", host, how)
         self.config.device.ip = host
+        # Re-learn the MAC as well. A TV presents a different one on each of its
+        # interfaces, so if it moved between Wi-Fi and Ethernet the stored MAC is
+        # now somebody else's - or nobody's. Keeping the stale one would mean
+        # every future recovery had to go the slow way round again, and the WOL
+        # that wakes the TV from deep standby would be aimed at an address that
+        # no longer exists.
+        try:
+            from . import netdiag
+            fresh = netdiag.canon_mac(netdiag.mac_for_ip(host))
+            if fresh and fresh != netdiag.canon_mac(mac) and netdiag.is_lg_mac(fresh):
+                self.logger.info("The TV's MAC has changed (%s -> %s); saving the "
+                                 "new one.", mac or "(unset)", fresh)
+                self.config.device.mac = fresh
+        except Exception:  # noqa: BLE001 - learning the MAC is best-effort
+            pass
         self._drop_client()
         try:
             self.config.save()

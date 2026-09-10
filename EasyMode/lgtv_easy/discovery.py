@@ -264,20 +264,33 @@ def locate_tv(mac: str = "", timeout: float = 3.0,
     so it can never silently hijack the wrong device. Returns the IP or ``None``;
     never raises.
 
-    ``allow_guess=False`` drops even that single-TV fallback, so nothing is
-    contacted unless its MAC is the one we paired with. Adopting a TV means
-    connecting to it, and connecting means a registration the TV may not
-    recognise - which it announces by putting "a mobile device wants to
-    connect?" on screen, over whatever its owner is watching. That is a fine
-    thing to risk while somebody is sitting in the app waiting to press Accept,
-    and not something a background watcher should ever do to a household. So
-    the daemon and the silent startup self-test pass False; the paths a person
-    actually asked for keep the fallback.
+    ``allow_guess=False`` drops the *unidentified*-TV fallback, so an LG device
+    is never adopted on the strength of "it is the only one here". Adopting a TV
+    means connecting to it, and connecting means a registration the TV may not
+    recognise - which it announces by putting "a mobile device wants to connect?"
+    on screen, over whatever its owner is watching. That is a fine thing to risk
+    while somebody is sitting in the app waiting to press Accept, and not
+    something a background watcher should ever do to a household. So the daemon
+    and the silent startup self-test pass False.
+
+    It does *not* drop the verified fallback below, because that one identifies
+    the TV without contacting it in any way it can react to.
     """
     out = log or _noop
     from . import netdiag
     if netdiag.canon_mac(mac):
-        return locate_by_mac(mac, timeout=timeout, log=log)
+        found = locate_by_mac(mac, timeout=timeout, log=log)
+        if found:
+            return found
+        # The stored MAC matched nothing. The old code stopped here, and that is
+        # the whole of the bug: a MAC is not the permanent identifier this
+        # assumed. A TV has one per interface, so moving it between Wi-Fi and
+        # Ethernet - or a panel that re-rolls its Wi-Fi module's address after a
+        # power cut - leaves a stored MAC that can never match again. The app
+        # then hunted for a device that no longer exists, every thirty seconds,
+        # for as long as it was left running, while the TV sat on the LAN
+        # answering anyone who asked.
+        return _locate_relocated_tv(out)
     if not allow_guess:
         out("No saved MAC to identify the TV by, so not searching: adopting "
             "some other TV on the network would interrupt whoever is watching "
@@ -304,4 +317,34 @@ def locate_tv(mac: str = "", timeout: float = 3.0,
     if len(hosts) > 1:
         out(f"Found {len(hosts)} WebOS-like hosts and no MAC to disambiguate - "
             "not guessing. Pair the TV once to lock onto it.")
+    return None
+
+
+def _locate_relocated_tv(out: Callable[[str], None]) -> Optional[str]:
+    """Find our TV again when its stored MAC has stopped matching.
+
+    Safe to run unattended, which is the point of it: both signals it uses -
+    an LG vendor prefix, and a completed WebSocket handshake on a webOS control
+    port - identify the TV without sending it anything it can react to, so
+    nothing here can put a pairing prompt on anybody's screen. Only the
+    subsequent connection can do that, and only when exactly one LG TV is
+    present to connect to.
+    """
+    from . import netdiag
+    out("Stored MAC matched nothing; looking for an LG webOS TV instead "
+        "(a TV changes MAC when it moves between Wi-Fi and Ethernet)...")
+    try:
+        found = netdiag.lg_tv_hosts()
+    except Exception:  # noqa: BLE001 - best effort
+        return None
+    if len(found) == 1:
+        ip, mac = found[0]
+        out(f"Found an LG webOS TV at {ip} (MAC {mac}) - adopting it as the "
+            "saved TV's new address.")
+        return ip
+    if len(found) > 1:
+        out(f"Found {len(found)} LG webOS TVs and the stored MAC matches none "
+            "of them - not guessing which is yours. Open the app and pair again.")
+    else:
+        out("No LG webOS TV answered on this network.")
     return None

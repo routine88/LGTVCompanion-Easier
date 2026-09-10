@@ -271,10 +271,13 @@ def test_webos_hosts_finds_open_control_ports(monkeypatch):
     monkeypatch.setattr(netdiag, "arp_table",
                         lambda timeout=4.0: [("192.168.86.33", "B8:16:5F:72:64:C6"),
                                              ("192.168.86.1", "A0:B1:C2:D3:E4:F5")])
-    # Only the TV answers on a WebOS port.
+    # Only the TV completes a WebSocket handshake on a WebOS port. The probe
+    # is a handshake rather than a bare TCP connect on purpose: port 3000 is
+    # the most-used dev-server port there is, and "something accepted a
+    # connection" used to offer a Node container as a candidate TV.
     monkeypatch.setattr(
-        netdiag, "tcp_probe",
-        lambda ip, port, timeout=2.0: (ip == "192.168.86.33", "x"))
+        netdiag, "speaks_webos",
+        lambda ip, port, timeout=2.0: ip == "192.168.86.33")
     assert netdiag.webos_hosts() == ["192.168.86.33"]
 
 
