@@ -1137,6 +1137,8 @@ class SetupWizard(ttk.Frame):
         cfg.idle_minutes = self.sleep_slider.value() / 60.0
         cfg.idle_enabled = True
         cfg.setup_complete = True
+        from .config import pin_panel
+        pin_panel(cfg.device)
         cfg.save()
         self.app.show_settings()
         self.app.notify_running_daemon()

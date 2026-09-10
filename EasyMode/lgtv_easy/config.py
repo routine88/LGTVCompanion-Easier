@@ -63,10 +63,34 @@ class Device:
     # from the TV - it's whatever is on screen while this PC's user is at the
     # keyboard - so nothing has to be configured. Empty until learned.
     input_id: str = ""
+    # The EDID identity of the panel on this PC's own display cable, recorded
+    # when setup succeeded (see lgtv_easy.display). Not a network address and
+    # never used as one - it answers "is the TV I was set up against still the
+    # one plugged in here", which is the question that stops the app adopting
+    # some other LG TV that merely happens to be the only one answering.
+    panel: str = ""
 
     @property
     def paired(self) -> bool:
         return bool(self.key)
+
+
+def pin_panel(device) -> str:
+    """Record which physical display this TV is, if we can see one.
+
+    Called when setup succeeds. Best-effort by design: a headless machine, or a
+    TV plugged into a different PC, simply leaves it blank and everything else
+    carries on working exactly as before.
+    """
+    try:
+        from .display import lg_panel
+        panel = lg_panel()
+    except Exception:  # noqa: BLE001 - never block setup over a diagnostic
+        return ""
+    if panel is None:
+        return ""
+    device.panel = panel.identity
+    return device.panel
 
 
 @dataclass

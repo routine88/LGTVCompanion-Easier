@@ -142,6 +142,10 @@ class Daemon:
         # limited separately so it can't run on every failed poll.
         self._next_relocate_at = 0.0
         self.relocations = 0             # times we adopted a new IP (observable)
+        # An address we have moved to but not yet proved is our TV. Nothing is
+        # written to disk until the TV at that address accepts our pairing key -
+        # see _relocate. None when there is no unconfirmed move in flight.
+        self._unconfirmed_from: Optional[str] = None
         # Deep-off recovery: track how long we've been failing to wake the TV
         # from full standby so we can give up (and disable deep-off) rather than
         # strand it forever if WoL can't reach it. None = not currently failing.
@@ -220,6 +224,7 @@ class Daemon:
                     return self._connect_once()
                 except Exception as exc2:  # noqa: BLE001
                     exc = exc2
+                    self._abandon_unconfirmed_move()
             self.last_error = f"connect: {exc}"
             self._note_connect_failure(exc)
             self._client = None
@@ -255,6 +260,27 @@ class Daemon:
                 self.config.device.mac = mac
                 changed = True
                 self.logger.info("Detected TV MAC for Wake-on-LAN: %s", mac)
+        if self._unconfirmed_from is not None:
+            # The TV at the new address accepted our key, so it is ours. Now the
+            # move is worth keeping - and so is the MAC it is using, which a TV
+            # changes whenever it moves between Wi-Fi and Ethernet. A stale MAC
+            # sends every future recovery the slow way round and aims the
+            # wake-on-LAN at an address that belongs to nothing.
+            from . import netdiag
+            host = (client.ip.rpartition(":")[0] if ":" in client.ip
+                    else client.ip)
+            self.logger.info("The TV at %s accepted our pairing key; saving it "
+                             "as the new address (was %s).", host,
+                             self._unconfirmed_from or "(unset)")
+            fresh = netdiag.canon_mac(netdiag.mac_for_ip(host))
+            if (fresh and netdiag.is_lg_mac(fresh)
+                    and fresh != netdiag.canon_mac(self.config.device.mac)):
+                self.logger.info("The TV's MAC has changed (%s -> %s); saving "
+                                 "the new one.",
+                                 self.config.device.mac or "(unset)", fresh)
+                self.config.device.mac = fresh
+            self._unconfirmed_from = None
+            changed = True
         if changed:
             try:
                 self.config.save()
@@ -307,29 +333,35 @@ class Daemon:
         how = f"by MAC {mac}" if mac else "by discovery"
         self.logger.info("TV not reachable at %s; found it at %s %s - "
                          "updating the saved address.", old or "(unset)", host, how)
+        # Move there, but do NOT write it down yet. An address found by sweeping
+        # the LAN is a candidate, not an identification: when our own TV is
+        # merely absent, the "only LG TV here" can easily be the neighbour's, or
+        # the other set in the house. Writing that in is how the app ends up
+        # quietly driving the wrong television - which happened, to a real user,
+        # with this code. Only the TV that accepts our pairing key is ours, and
+        # _connect_once is what finds that out; it persists the move, and
+        # _ensure_client puts the old address back if it does not.
+        self._unconfirmed_from = old
         self.config.device.ip = host
-        # Re-learn the MAC as well. A TV presents a different one on each of its
-        # interfaces, so if it moved between Wi-Fi and Ethernet the stored MAC is
-        # now somebody else's - or nobody's. Keeping the stale one would mean
-        # every future recovery had to go the slow way round again, and the WOL
-        # that wakes the TV from deep standby would be aimed at an address that
-        # no longer exists.
-        try:
-            from . import netdiag
-            fresh = netdiag.canon_mac(netdiag.mac_for_ip(host))
-            if fresh and fresh != netdiag.canon_mac(mac) and netdiag.is_lg_mac(fresh):
-                self.logger.info("The TV's MAC has changed (%s -> %s); saving the "
-                                 "new one.", mac or "(unset)", fresh)
-                self.config.device.mac = fresh
-        except Exception:  # noqa: BLE001 - learning the MAC is best-effort
-            pass
         self._drop_client()
-        try:
-            self.config.save()
-        except Exception:  # noqa: BLE001 - persistence is best-effort
-            pass
         self.relocations += 1
         return True
+
+    def _abandon_unconfirmed_move(self) -> None:
+        """Put the saved address back: the TV we moved to is not ours.
+
+        Leaving it would be worse than never having moved. The next poll would
+        connect to a stranger's TV, and every one after it, and the app would
+        blank a television nobody asked it to touch.
+        """
+        if self._unconfirmed_from is None:
+            return
+        rejected, self.config.device.ip = self.config.device.ip, self._unconfirmed_from
+        self.logger.info("The TV at %s did not accept our pairing key, so it is "
+                         "not ours; keeping %s.", rejected,
+                         self._unconfirmed_from or "(no saved address)")
+        self._unconfirmed_from = None
+        self._drop_client()
 
     def _note_connect_failure(self, exc: Exception) -> None:
         """Record a failed connection: schedule the next retry with exponential

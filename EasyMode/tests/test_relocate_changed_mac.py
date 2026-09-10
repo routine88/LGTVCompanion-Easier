@@ -120,35 +120,107 @@ def test_a_mac_that_still_matches_takes_the_fast_path(monkeypatch):
     assert swept == [], "swept the LAN even though the stored MAC matched"
 
 
-# ----- and the daemon remembers ----------------------------------------------
-def test_the_daemon_saves_the_tvs_new_mac(monkeypatch, tmp_path):
-    """Without this the app re-runs the slow search on every future outage, and
-    aims its wake-on-LAN at a MAC that belongs to nothing."""
+# ----- an address is only kept once the TV there proves it is ours -----------
+# The safeguard this section exists for: sweeping the LAN produces a *candidate*,
+# not an identification. When our own TV is merely absent, the "only LG TV here"
+# is somebody else's - the other set in the house, or a neighbour's. Writing that
+# in is how the app comes to quietly drive the wrong television, which is exactly
+# what happened to a real user with the previous code.
+def _daemon_against(tv, cfg, monkeypatch, reachable_at="127.0.0.1"):
+    from lgtv_easy.daemon import Daemon
+    from lgtv_easy.webos import WebOSClient
+
+    def factory():
+        if cfg.device.ip != reachable_at:
+            raise OSError("No route to host")
+        client = WebOSClient(reachable_at)
+        client._url = lambda: tv.url
+        return client
+
+    return Daemon(cfg, client_factory=factory,
+                  locator_fn=lambda mac: reachable_at,
+                  idle_fn=lambda: 0.0, logger=_quiet())
+
+
+def _quiet():
+    import logging
+    log = logging.getLogger("lgtv-easy-test-changed-mac")
+    log.addHandler(logging.NullHandler())
+    log.propagate = False
+    return log
+
+
+def test_relocating_alone_writes_nothing_to_disk(tmp_path, monkeypatch):
+    """The move is provisional until the TV accepts our key. Persisting first
+    and asking questions later is the bug."""
     monkeypatch.setenv("LGTV_EASY_HOME", str(tmp_path))
     from lgtv_easy.config import Config, Device
     from lgtv_easy.daemon import Daemon
 
     cfg = Config()
     cfg.device = Device(name="t", ip="192.168.86.27", mac=OURS, key="k")
-    daemon = Daemon(cfg, locator_fn=lambda mac: "192.168.86.51")
-    monkeypatch.setattr(netdiag, "mac_for_ip", lambda ip: THEIRS)
+    cfg.save()
+    daemon = Daemon(cfg, locator_fn=lambda mac: "192.168.86.51", logger=_quiet())
 
     assert daemon._relocate(force=True) is True
-    assert cfg.device.ip == "192.168.86.51"
-    assert netdiag.canon_mac(cfg.device.mac) == netdiag.canon_mac(THEIRS)
+    assert cfg.device.ip == "192.168.86.51"            # moved, in memory
+    assert Config.load().device.ip == "192.168.86.27"  # but not written down
 
 
-def test_a_non_lg_mac_is_never_adopted_as_the_tvs(monkeypatch, tmp_path):
+def test_the_address_and_mac_are_saved_once_the_tv_accepts_our_key(tmp_path,
+                                                                   monkeypatch):
+    monkeypatch.setenv("LGTV_EASY_HOME", str(tmp_path))
+    from lgtv_easy.config import Config, Device
+
+    with MockTV(require_pairing=False) as tv:
+        cfg = Config(idle_minutes=1.0)
+        cfg.device = Device(name="t", ip="10.0.0.5", mac=OURS,
+                            key="MOCK-KEY-0001")
+        monkeypatch.setattr(netdiag, "mac_for_ip", lambda ip: THEIRS)
+        daemon = _daemon_against(tv, cfg, monkeypatch)
+
+        assert daemon.wake_screen() is True
+        assert Config.load().device.ip == "127.0.0.1"
+        assert netdiag.canon_mac(Config.load().device.mac) == \
+            netdiag.canon_mac(THEIRS)
+
+
+def test_a_tv_that_rejects_our_key_is_not_adopted(tmp_path, monkeypatch):
+    """The whole point. A set that refuses the stored key is not ours, so the
+    saved address must go back to what it was - otherwise every poll after this
+    one talks to a stranger's TV."""
+    monkeypatch.setenv("LGTV_EASY_HOME", str(tmp_path))
+    from lgtv_easy.config import Config, Device
+    from lgtv_easy.daemon import Daemon
+
+    cfg = Config()
+    cfg.device = Device(name="t", ip="192.168.86.27", mac=OURS, key="k")
+    cfg.save()
+
+    def factory():
+        raise OSError("Connection closed during registration")
+
+    daemon = Daemon(cfg, client_factory=factory,
+                    locator_fn=lambda mac: "192.168.86.99", logger=_quiet())
+    assert daemon._ensure_client(force=True) is None
+    assert cfg.device.ip == "192.168.86.27", "kept a TV that refused our key"
+    assert Config.load().device.ip == "192.168.86.27"
+
+
+def test_a_non_lg_mac_is_never_written_in_as_the_tvs(tmp_path, monkeypatch):
     """mac_for_ip reads the ARP table, which can hand back a router's MAC for an
-    address that has just moved. Writing that in would break wake-on-LAN."""
+    address that has just moved. Storing that would break wake-on-LAN."""
     monkeypatch.setenv("LGTV_EASY_HOME", str(tmp_path))
     from lgtv_easy.config import Config, Device
-    from lgtv_easy.daemon import Daemon
 
-    cfg = Config()
-    cfg.device = Device(name="t", ip="192.168.86.27", mac=OURS, key="k")
-    daemon = Daemon(cfg, locator_fn=lambda mac: "192.168.86.51")
-    monkeypatch.setattr(netdiag, "mac_for_ip", lambda ip: "b0:6a:41:ae:6f:60")
+    with MockTV(require_pairing=False) as tv:
+        cfg = Config(idle_minutes=1.0)
+        cfg.device = Device(name="t", ip="10.0.0.5", mac=OURS,
+                            key="MOCK-KEY-0001")
+        monkeypatch.setattr(netdiag, "mac_for_ip",
+                            lambda ip: "b0:6a:41:ae:6f:60")   # the router
+        daemon = _daemon_against(tv, cfg, monkeypatch)
 
-    assert daemon._relocate(force=True) is True
-    assert netdiag.canon_mac(cfg.device.mac) == netdiag.canon_mac(OURS)
+        assert daemon.wake_screen() is True
+        assert netdiag.canon_mac(Config.load().device.mac) == \
+            netdiag.canon_mac(OURS)

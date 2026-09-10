@@ -209,6 +209,8 @@ def cmd_pair(args) -> int:
     cfg.device = Device(name=args.name or cfg.device.name or "My LG TV",
                         ip=args.ip, mac=mac, key=key, secure=client.secure)
     cfg.setup_complete = True
+    from .config import pin_panel
+    pin_panel(cfg.device)
     cfg.save()
     _print(f"Paired! Saved TV '{cfg.device.name}' at {args.ip}.")
     return 0

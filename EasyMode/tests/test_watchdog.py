@@ -229,3 +229,34 @@ def test_an_unreadable_verdict_file_is_just_no_news(tmp_path, monkeypatch):
     monkeypatch.setenv("LGTV_EASY_HOME", str(tmp_path))
     (tmp_path / selfheal.DIAGNOSIS_FILE).write_text("{ not json", encoding="utf-8")
     assert selfheal.load_diagnosis() is None
+
+
+# ----- "probably switched off" is a claim, and it needs evidence -------------
+def test_a_tv_on_this_pcs_own_cable_is_never_reported_as_switched_off(monkeypatch):
+    """The misdiagnosis this whole feature exists to stop. The app told a user
+    their TV was probably off while that TV was driving the desktop they were
+    reading it on - and "wait, it will come back" is the opposite of the advice
+    they needed."""
+    from lgtv_easy import display, netdiag
+    from lgtv_easy.config import Config, Device
+
+    cfg = Config()
+    # Same subnet as the PC, so the "different networks" verdict cannot fire
+    # first and mask what is being tested here.
+    cfg.device = Device(name="t", ip="192.168.86.10", key="k")
+    monkeypatch.setattr(netdiag, "local_ipv4s", lambda: ["192.168.86.21"])
+    failed = selfheal.RepairResult(ok=False, error="timed out")
+
+    monkeypatch.setattr(display, "tv_is_physically_on", lambda: True)
+    assert selfheal._classify(cfg, failed) == selfheal.VERDICT_TV_NOT_ON_NETWORK
+
+    # ...and with no display attached there is no evidence, so the old, calm
+    # answer is still the right one.
+    monkeypatch.setattr(display, "tv_is_physically_on", lambda: False)
+    assert selfheal._classify(cfg, failed) == selfheal.VERDICT_TV_OFF
+
+
+def test_a_tv_that_is_on_but_unreachable_asks_for_help(monkeypatch):
+    """It will not fix itself, so it must not be filed with the quiet ones."""
+    assert selfheal.VERDICT_TV_NOT_ON_NETWORK in selfheal.NEEDS_USER
+    assert selfheal.VERDICT_TV_OFF not in selfheal.NEEDS_USER

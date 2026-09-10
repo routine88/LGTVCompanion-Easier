@@ -255,6 +255,8 @@ def _finish(cfg, ip, name, key, mac, secure, input_fn, out) -> int:
     cfg.deep_off_enabled = deep
     cfg.deep_off_minutes = deep_minutes
     cfg.setup_complete = True
+    from .config import pin_panel
+    pin_panel(cfg.device)
     cfg.save()
 
     auto_msg = autostart_mod.set_enabled(auto)

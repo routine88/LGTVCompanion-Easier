@@ -332,9 +332,15 @@ VERDICT_TV_OFF = "tv-off"                # nothing answers and nothing is wrong 
 VERDICT_PAIRING = "pairing"              # the TV answers but refuses us
 VERDICT_NO_NETWORK = "no-network"        # this PC is not on any network
 VERDICT_WRONG_NETWORK = "wrong-network"  # PC and TV are on different subnets
+# Powered, on this PC's own display cable, and still not answering: the TV is
+# on some other network. Distinguished from VERDICT_TV_OFF because the advice is
+# the opposite - "wait, it will come back" is wrong, and waiting is what the app
+# did for two days while the user watched it do nothing.
+VERDICT_TV_NOT_ON_NETWORK = "tv-not-on-network"
 
 # The verdicts that will not improve on their own, however long we wait.
-NEEDS_USER = (VERDICT_PAIRING, VERDICT_NO_NETWORK, VERDICT_WRONG_NETWORK)
+NEEDS_USER = (VERDICT_PAIRING, VERDICT_NO_NETWORK, VERDICT_WRONG_NETWORK,
+              VERDICT_TV_NOT_ON_NETWORK)
 
 
 @dataclass
@@ -394,6 +400,16 @@ def _classify(cfg: Config, res: RepairResult) -> str:
         note = netdiag.same_subnet_guess(pc_ips, saved)
         if note and "WARNING" in note:
             return VERDICT_WRONG_NETWORK
+    # Before concluding "switched off", ask the one source that actually knows.
+    # A TV driving this PC's desktop over HDMI is not off, whatever the network
+    # thinks, and telling its owner to go and switch it on is how you lose their
+    # trust in everything else the app says.
+    try:
+        from . import display
+        if display.tv_is_physically_on():
+            return VERDICT_TV_NOT_ON_NETWORK
+    except Exception:  # noqa: BLE001 - no display, no opinion
+        pass
     return VERDICT_TV_OFF
 
 
@@ -414,6 +430,20 @@ def diagnose(cfg: Config, *, log: Optional[Callable[[str], None]] = None,
     verdict = _classify(cfg, res)
     summary = res.summary or ("The TV is reachable." if res.ok else
                               "Could not reach the TV.")
+    if verdict == VERDICT_TV_NOT_ON_NETWORK:
+        seen = ""
+        try:
+            from . import display
+            panel = display.lg_panel()
+            seen = f" ({panel.describe()})" if panel else ""
+        except Exception:  # noqa: BLE001
+            pass
+        summary = (
+            f"Your TV is switched on - this PC can see it on its display "
+            f"cable{seen} - but nothing on the network answers it. Its Wi-Fi is "
+            "almost certainly joined to a different network from this computer: "
+            "a guest network, or a second SSID on the same router. On the TV, "
+            "open Settings > Network and put it on the same Wi-Fi this PC uses.")
     if verdict == VERDICT_TV_OFF and not res.ok:
         # The generic "couldn't find your TV" line is right, but the watcher is
         # allowed to be calmer about it than a person who just pressed a button:
