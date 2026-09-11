@@ -202,3 +202,89 @@ def test_the_quick_launch_shortcut_lands_in_the_real_folder(monkeypatch,
     assert dock.quick_launch_link() == (
         tmp_path / "Microsoft" / "Internet Explorer" / "Quick Launch"
         / f"{dock.FRIENDLY}.lnk")
+
+
+# ----- the icon has to appear without anyone running an installer ------------
+def test_launching_the_app_creates_the_menu_entry_and_pins_it_once():
+    """An icon you only get if you happened to run an installer is an icon most
+    people never get. The app makes it on launch instead."""
+    assert dock.installed_entry() is None
+    assert dock.is_pinned() is False
+    dock.ensure_on_launch()
+    assert dock.installed_entry() is not None
+    assert dock.is_pinned() is True
+
+
+def test_an_icon_the_user_removed_stays_removed():
+    """The dock belongs to the user. Putting back something they deliberately
+    dragged off it at every launch is how an app gets uninstalled."""
+    dock.ensure_on_launch()
+    assert dock.remove() is True
+    dock.ensure_on_launch()
+    assert dock.is_pinned() is False, "re-pinned an icon the user took off"
+
+
+def test_the_menu_entry_is_still_repaired_after_the_user_unpins():
+    """Preference and correctness are different things: the dock is theirs, a
+    missing or broken menu entry is a bug."""
+    dock.ensure_on_launch()
+    dock.remove()
+    dock.installed_entry().unlink()
+    dock.ensure_on_launch()
+    assert dock.installed_entry() is not None
+    assert dock.is_pinned() is False
+
+
+# ----- the entry we write has to be legal ------------------------------------
+def test_actions_carry_only_the_keys_the_spec_allows():
+    """"Terminal" is legal in [Desktop Entry] and a violation inside a
+    [Desktop Action]; desktop-file-validate rejects the file outright, and a
+    rejected file is one some shells decline to show at all."""
+    entry = dock.ensure_entry()
+    text = entry.read_text(encoding="utf-8")
+    in_action = False
+    for line in text.splitlines():
+        if line.startswith("["):
+            in_action = line.startswith("[Desktop Action")
+            continue
+        if in_action and "=" in line:
+            key = line.split("=", 1)[0]
+            assert key in ("Name", "Icon", "Exec") or key.startswith("X-"), \
+                f"{key!r} is not allowed in a [Desktop Action] group"
+
+
+def test_an_entry_with_an_illegal_action_key_is_detected_and_rewritten():
+    entry = dock.ensure_entry()
+    entry.write_text(entry.read_text(encoding="utf-8") + "\nTerminal=true\n",
+                     encoding="utf-8")
+    assert dock._entry_is_broken(entry) is True
+    dock.ensure_entry()
+    assert dock._entry_is_broken(entry) is False
+
+
+def test_a_healthy_entry_is_left_exactly_as_it_is():
+    """install.sh writes a richer entry than this module would. Repair must fix
+    what is broken, not overwrite what is not."""
+    entry = dock._data_home() / "applications" / dock.DESKTOP_FILE
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text("[Desktop Entry]\nType=Application\nName=Installed by the "
+                     "installer\nExec=/usr/bin/true\n", encoding="utf-8")
+    dock.ensure_entry()
+    assert "Installed by the installer" in entry.read_text(encoding="utf-8")
+
+
+def test_the_icon_is_named_not_pathed_once_the_theme_has_it():
+    """An absolute path into wherever this copy happens to be running from is an
+    icon that breaks the day that folder moves."""
+    dock.install_icons()
+    entry = dock.ensure_entry()
+    text = entry.read_text(encoding="utf-8")
+    assert f"Icon={dock.DESKTOP_ID}\n" in text, "the entry hard-codes an icon path"
+
+
+def test_icons_are_installed_into_the_theme():
+    assert dock.install_icons() > 0
+    sizes = list((dock._icon_dir()).glob("*/apps/" + dock.DESKTOP_ID + ".*"))
+    assert sizes, "no icons landed in the hicolor theme"
+    # Running twice must not re-copy what is already there.
+    assert dock.install_icons() == 0

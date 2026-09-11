@@ -786,6 +786,15 @@ class App(tk.Tk):
         else:
             self.show_wizard()
 
+    def _ensure_launcher_icon(self):
+        """Create the menu entry (and, once, the dock icon). Never raises."""
+        try:
+            from . import dock as dock_mod
+            from .applog import get_logger
+            get_logger().debug("Launcher icon: %s", dock_mod.ensure_on_launch())
+        except Exception:  # noqa: BLE001 - an icon is never worth a crash
+            pass
+
     def show_wizard(self):
         self._clear()
         SetupWizard(self.container, self).pack(fill="both", expand=True)
@@ -852,6 +861,10 @@ class App(tk.Tk):
         if not self._lock.acquire(wait=False):
             self._lock = None  # someone else owns the watcher; don't compete
             return
+        # Make sure this app has an icon people can click, every time it runs -
+        # not only if somebody happened to run an installer. Off the main thread:
+        # it shells out to gsettings, and the window must not wait on that.
+        threading.Thread(target=self._ensure_launcher_icon, daemon=True).start()
         self.daemon = Daemon(self.cfg)
         # A window is already open in front of the user, so the watcher's
         # self-check must not open a second one at them.

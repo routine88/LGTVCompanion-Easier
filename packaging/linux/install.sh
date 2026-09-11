@@ -262,6 +262,12 @@ say "  icons    -> $ICONS_DIR"
 # StartupWMClass is the important line: it ties the running window to this entry,
 # which is how the dock/taskbar button gets the app's icon and name instead of a
 # grey placeholder marked "python3".
+#
+# Note what the action groups may contain: Name, Icon and Exec, and nothing else.
+# "Terminal" is legal in [Desktop Entry] and a spec violation inside a
+# [Desktop Action], which desktop-file-validate rejects outright - so the repair
+# action opens the app's window (where "Test and repair" lives) rather than
+# asking for a terminal it is not allowed to ask for here.
 mkdir -p "$APPS_DIR"
 cat >"$DESKTOP_FILE" <<EOF
 [Desktop Entry]
@@ -282,13 +288,11 @@ Actions=Repair;TVOff;
 
 [Desktop Action Repair]
 Name=Test and repair the TV connection
-Exec=$LAUNCHER repair
-Terminal=true
+Exec=$LAUNCHER gui
 
 [Desktop Action TVOff]
 Name=Turn the TV off now
 Exec=$LAUNCHER off
-Terminal=false
 EOF
 chmod 0644 "$DESKTOP_FILE"
 say "  menu     -> $DESKTOP_FILE"

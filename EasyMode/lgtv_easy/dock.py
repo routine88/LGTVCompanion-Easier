@@ -214,8 +214,84 @@ def _exec_line() -> str:
     return f"sh -c 'cd \"{branding.app_dir()}\" && {inner}'"
 
 
+def _try_exec() -> str:
+    """The command whose absence should hide this entry, if we can name one."""
+    installed = shutil.which("lgtv-easy") or str(
+        Path.home() / ".local" / "bin" / "lgtv-easy")
+    return installed if Path(installed).exists() else ""
+
+
+def _action_exec(subcommand: str) -> str:
+    """``Exec=`` for a right-click action that runs one CLI subcommand."""
+    installed = shutil.which("lgtv-easy") or str(
+        Path.home() / ".local" / "bin" / "lgtv-easy")
+    if Path(installed).exists():
+        return f'"{installed}" {subcommand}'
+    argv = branding.launch_command(subcommand, windowed=True)
+    inner = " ".join(f'"{part}"' if " " in part else part for part in argv)
+    if branding.frozen():
+        return inner
+    return f"sh -c 'cd \"{branding.app_dir()}\" && {inner}'"
+
+
+def _icon_dir() -> Path:
+    return _data_home() / "icons" / "hicolor"
+
+
+def install_icons() -> int:
+    """Copy the app's PNGs into the icon theme. Returns how many were placed.
+
+    Without these, ``Icon=lgtv-companion-easy`` resolves to nothing and the dock
+    shows a grey placeholder - which to the user looks exactly like the shortcut
+    having failed to appear at all.
+    """
+    placed = 0
+    for source in sorted(branding.ASSETS.glob("icon-*.png")):
+        size = source.stem.split("-", 1)[1]
+        if not size.isdigit():
+            continue
+        target = _icon_dir() / f"{size}x{size}" / "apps" / f"{DESKTOP_ID}.png"
+        if target.exists():
+            continue
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            placed += 1
+        except OSError:
+            continue
+    svg = branding.ASSETS / "icon.svg"
+    scalable = _icon_dir() / "scalable" / "apps" / f"{DESKTOP_ID}.svg"
+    if svg.exists() and not scalable.exists():
+        try:
+            scalable.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(svg, scalable)
+            placed += 1
+        except OSError:
+            pass
+    if placed and not _sandbox():
+        _run(["gtk-update-icon-cache", "-f", "-t", str(_icon_dir())])
+    return placed
+
+
+def _icon_value() -> str:
+    """What to put after ``Icon=``.
+
+    The icon-theme *name* whenever the theme can actually resolve it, because a
+    name survives the app being moved, reinstalled or run from somewhere else.
+    An absolute path is the fallback and nothing more: pointing a permanent
+    desktop entry at wherever this copy happens to be running from is how an
+    icon quietly breaks the day that folder moves.
+    """
+    if any((_icon_dir() / f"{size}x{size}" / "apps" / f"{DESKTOP_ID}.png").exists()
+           for size in (16, 22, 24, 32, 48, 64, 128, 256, 512)):
+        return DESKTOP_ID
+    if (_icon_dir() / "scalable" / "apps" / f"{DESKTOP_ID}.svg").exists():
+        return DESKTOP_ID
+    return branding.icon_png()
+
+
 def _entry_content() -> str:
-    icon = branding.icon_png()
+    icon = _icon_value()
     return (
         "[Desktop Entry]\n"
         "Type=Application\n"
@@ -224,6 +300,7 @@ def _entry_content() -> str:
         "GenericName=TV screen sleep\n"
         "Comment=Sleep your LG TV like a PC monitor, and wake it when you return\n"
         f"Exec={_exec_line()}\n"
+        + (f"TryExec={_try_exec()}\n" if _try_exec() else "")
         + (f"Icon={icon}\n" if icon else "") +
         "Terminal=false\n"
         "StartupNotify=true\n"
@@ -233,7 +310,48 @@ def _entry_content() -> str:
         f"StartupWMClass={branding.WM_CLASS}\n"
         "Categories=Utility;Settings;HardwareSettings;\n"
         "Keywords=LG;TV;OLED;monitor;idle;sleep;screen;burn-in;\n"
+        "Actions=Repair;TVOff;\n"
+        "\n"
+        "[Desktop Action Repair]\n"
+        f"Name=Test and repair the TV connection\n"
+        f"Exec={_exec_line()}\n"
+        "\n"
+        "[Desktop Action TVOff]\n"
+        "Name=Turn the TV off now\n"
+        f"Exec={_action_exec('off')}\n"
     )
+
+
+# Only Name, Icon and Exec may appear in a [Desktop Action] group. "Terminal"
+# there is a spec violation that desktop-file-validate rejects outright - and an
+# entry the validator rejects is one some shells decline to show at all, which
+# is a dock icon that silently never appears.
+_ACTION_KEYS_ALLOWED = ("Name", "Icon", "Exec", "X-")
+
+
+def _entry_is_broken(path: Path) -> bool:
+    """True when an entry on disk would fail desktop-file-validate.
+
+    Only the defect we know we shipped is looked for: a key that is not legal
+    inside a [Desktop Action] group. Anything else on disk is left alone - this
+    repairs our own past mistakes, it does not police the file.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    in_action = False
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            in_action = line.startswith("[Desktop Action")
+            continue
+        if not in_action or "=" not in line or line.startswith("#"):
+            continue
+        key = line.split("=", 1)[0].strip()
+        if not key.startswith(_ACTION_KEYS_ALLOWED):
+            return True
+    return False
 
 
 def ensure_entry() -> "Path | None":
@@ -243,8 +361,22 @@ def ensure_entry() -> "Path | None":
     a dock could point at.
     """
     existing = installed_entry()
-    if existing:
+    if existing and not _entry_is_broken(existing):
         return existing
+    if existing:
+        # Ours to fix: an installer we shipped wrote an entry the spec rejects.
+        # Rewriting it is why this repair runs at every launch rather than only
+        # at install time - nobody reinstalls an app to fix its icon.
+        try:
+            install_icons()
+            existing.write_text(_entry_content(), encoding="utf-8")
+            os.chmod(existing, 0o644)
+            if not _sandbox():
+                _run(["update-desktop-database", str(existing.parent)])
+            return existing
+        except OSError:
+            return existing
+    install_icons()
     path = _data_home() / "applications" / DESKTOP_FILE
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -509,6 +641,53 @@ def remove() -> bool:
 def set_pinned(pinned: bool) -> str:
     return add() if pinned else (
         f"removed from {BAR_NAME}" if remove() else f"not on {BAR_NAME}")
+
+
+# Written the first time we pin, and never removed. It is what separates "this
+# user has never had the icon" from "this user had it and took it off their
+# dock" - and re-adding an icon somebody deliberately dragged away is the
+# behaviour that gets an app uninstalled.
+PINNED_ONCE_MARKER = "dock-pinned-once"
+
+
+def _marker_path() -> Path:
+    if _sandbox():
+        return Path(_sandbox()) / PINNED_ONCE_MARKER
+    from .config import config_dir
+    return Path(config_dir()) / PINNED_ONCE_MARKER
+
+
+def ensure_on_launch() -> str:
+    """Make the app's icon exist and, the first time only, put it on the dock.
+
+    Called every time the app opens, because an icon that only ever appears if
+    you happen to run an installer is an icon most people never get. Two halves,
+    deliberately different:
+
+    * the menu entry and its icons are *repaired* every launch. That is
+      correctness, not preference - a missing or spec-invalid entry is a bug
+      whoever's machine it is on.
+    * the dock pin happens **once**, and is remembered. After that the dock
+      belongs to the user, and if they take the icon off it stays off.
+
+    Returns a line for the log. Never raises.
+    """
+    try:
+        entry = ensure_entry()
+        if entry is None:
+            return "could not create the applications-menu entry"
+        marker = _marker_path()
+        if marker.exists():
+            return f"menu entry is in place ({entry.name}); dock left as the user set it"
+        result = add()
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("", encoding="utf-8")
+        except OSError:
+            pass
+        return result
+    except Exception as exc:  # noqa: BLE001 - a decoration, never fatal
+        return f"could not set up the launcher icon: {exc}"
 
 
 def status() -> str:

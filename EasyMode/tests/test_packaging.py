@@ -208,3 +208,20 @@ def test_the_linux_installer_is_posix_sh():
     assert sh.startswith("#!/bin/sh"), "must run under dash, not just bash"
     for bashism in ("[[", "declare ", "local ", "=(", "function "):
         assert bashism not in sh, f"bash-only syntax in a /bin/sh script: {bashism!r}"
+
+
+def test_the_desktop_actions_carry_only_legal_keys():
+    """"Terminal" is legal in [Desktop Entry] and a spec violation inside a
+    [Desktop Action]. The installer shipped it for months; desktop-file-validate
+    rejected the result, and an entry the validator rejects is one some shells
+    decline to show - which reads to the user as "the shortcut never appeared".
+    """
+    sh = read(LINUX, "install.sh")
+    actions = sh.split("[Desktop Action", 1)[1].split("EOF", 1)[0]
+    for line in actions.splitlines():
+        line = line.strip()
+        if "=" not in line or line.startswith(("#", "[")):
+            continue
+        key = line.split("=", 1)[0]
+        assert key in ("Name", "Icon", "Exec") or key.startswith("X-"), \
+            f"{key!r} is not allowed in a [Desktop Action] group"

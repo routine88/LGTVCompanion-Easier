@@ -7,6 +7,7 @@ Renders to an off-screen X display so no human interaction is needed.
 import os
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -68,10 +69,13 @@ def main():
     # wizard scans by itself - nobody should have to find a button to start it.
     assert "disabled" in wizard.next_btn.state(), \
         "Next was live before any TV had been found"
-    for _ in range(100):
+    # The scan runs on a worker thread, so wait on the clock rather than on a
+    # fixed number of pumps: a busy machine schedules that thread late, and a
+    # count that is generous on one box is a flaky failure on another.
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline and not wizard.found:
         pump(app)
-        if wizard.found:
-            break
+        time.sleep(0.02)
     assert wizard.found, "the wizard never scanned on its own"
     assert "disabled" not in wizard.next_btn.state(), \
         "Next stayed dead after a TV was found"
@@ -86,7 +90,6 @@ def main():
         pump(app)
         if wizard.client_key:
             break
-        import time
         time.sleep(0.05)
     assert wizard.client_key == tv.known_key, "wizard obtained a client key"
     assert tv.pair_prompts == 1
