@@ -19,6 +19,15 @@ def get_logger(to_console: bool = False) -> logging.Logger:
     if _LOGGER is not None:
         return _LOGGER
     logger = logging.getLogger("lgtv_easy")
+    # _LOGGER is a module global; the logger it caches is process-global. Import
+    # this module twice under different names - which a PYTHONPATH'd install plus
+    # a source tree manages easily - and the second import sees _LOGGER as None
+    # and attaches a *second* file handler to the same logger. Nothing breaks;
+    # every line just appears in the log twice, for ever, which makes the log
+    # look like the app is doing everything twice. Ask the logger itself.
+    if logger.handlers:
+        _LOGGER = logger
+        return logger
     logger.setLevel(logging.INFO)
     logger.propagate = False
 

@@ -288,3 +288,70 @@ def test_icons_are_installed_into_the_theme():
     assert sizes, "no icons landed in the hicolor theme"
     # Running twice must not re-copy what is already there.
     assert dock.install_icons() == 0
+
+
+def test_a_pin_that_does_not_stick_leaves_no_done_marker(monkeypatch):
+    """GNOME keeps favourites as desktop ids and silently drops the ones it
+    cannot resolve - so a brand-new entry gets its pin pruned moments after it
+    is written. gsettings reports success and the icon never appears. Recording
+    "done" for that is how an icon stays missing for ever: the next launch has
+    to try again."""
+    monkeypatch.setattr(dock, "add", lambda **kw: "claimed success")
+    monkeypatch.setattr(dock, "is_pinned", lambda: False)
+    monkeypatch.setattr(dock, "_PIN_ATTEMPTS", 1)
+    monkeypatch.setattr(dock, "_CONFIRM_WINDOW_SECONDS", 0.0)
+    monkeypatch.setattr(dock, "_INDEX_SETTLE_SECONDS", 0.0)
+    dock.ensure_on_launch()
+    assert not dock._marker_path().exists(), "marked done for a pin that failed"
+
+
+def test_the_pin_is_retried_until_the_desktop_keeps_it(monkeypatch):
+    attempts = {"n": 0}
+    stuck = {"v": False}
+
+    def flaky_add(**kw):
+        attempts["n"] += 1
+        stuck["v"] = attempts["n"] >= 3      # the shell keeps it on the 3rd go
+        return "added"
+
+    monkeypatch.setattr(dock, "add", flaky_add)
+    monkeypatch.setattr(dock, "is_pinned", lambda: stuck["v"])
+    monkeypatch.setattr(dock, "_PIN_ATTEMPTS", 4)
+    monkeypatch.setattr(dock, "_CONFIRM_WINDOW_SECONDS", 0.0)
+    monkeypatch.setattr(dock, "_INDEX_SETTLE_SECONDS", 0.0)
+    dock.ensure_on_launch()
+    assert attempts["n"] == 3
+    assert dock._marker_path().exists(), "a pin that stuck was not recorded"
+
+
+def test_a_pin_that_sticks_first_time_is_not_retried(monkeypatch):
+    attempts = {"n": 0}
+
+    def counting_add(**kw):
+        attempts["n"] += 1
+        return "added"
+
+    monkeypatch.setattr(dock, "add", counting_add)
+    monkeypatch.setattr(dock, "is_pinned", lambda: True)
+    monkeypatch.setattr(dock, "_CONFIRM_WINDOW_SECONDS", 0.0)
+    monkeypatch.setattr(dock, "_INDEX_SETTLE_SECONDS", 0.0)
+    dock.ensure_on_launch()
+    assert attempts["n"] == 1
+
+
+def test_the_logger_does_not_double_up_across_imports():
+    """Module-global memoisation over a process-global logger: import the module
+    twice under different names - a PYTHONPATH'd install plus a source tree does
+    it easily - and the second import attaches a second file handler. Nothing
+    breaks; every line just appears twice for ever, which makes the log read as
+    though the app is doing everything twice."""
+    import importlib
+    import logging
+
+    from lgtv_easy import applog
+
+    applog.get_logger()
+    for _ in range(3):
+        importlib.reload(applog)
+        applog.get_logger()
+    assert len(logging.getLogger("lgtv_easy").handlers) == 1

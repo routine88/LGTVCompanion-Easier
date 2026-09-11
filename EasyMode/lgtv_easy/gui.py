@@ -791,9 +791,12 @@ class App(tk.Tk):
         try:
             from . import dock as dock_mod
             from .applog import get_logger
-            get_logger().debug("Launcher icon: %s", dock_mod.ensure_on_launch())
-        except Exception:  # noqa: BLE001 - an icon is never worth a crash
-            pass
+            get_logger().info("Launcher icon: %s", dock_mod.ensure_on_launch())
+        except Exception as exc:  # noqa: BLE001 - an icon is never worth a crash
+            # Logged, not swallowed: a silent failure here is indistinguishable
+            # from the icon simply never having been asked for, which is how
+            # this went unnoticed in the first place.
+            get_logger().warning("Could not set up the launcher icon: %s", exc)
 
     def show_wizard(self):
         self._clear()

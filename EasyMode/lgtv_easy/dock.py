@@ -673,13 +673,19 @@ def ensure_on_launch() -> str:
     Returns a line for the log. Never raises.
     """
     try:
+        entry_is_new = installed_entry() is None
         entry = ensure_entry()
         if entry is None:
             return "could not create the applications-menu entry"
         marker = _marker_path()
         if marker.exists():
             return f"menu entry is in place ({entry.name}); dock left as the user set it"
-        result = add()
+        result = _pin_and_confirm(entry_is_new)
+        if not is_pinned():
+            # Deliberately no marker: the pin did not take, so the next launch
+            # must try again. Writing "done" for something that did not happen
+            # is how an icon stays missing for ever.
+            return result
         try:
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text("", encoding="utf-8")
@@ -688,6 +694,58 @@ def ensure_on_launch() -> str:
         return result
     except Exception as exc:  # noqa: BLE001 - a decoration, never fatal
         return f"could not set up the launcher icon: {exc}"
+
+
+# Seconds to let the desktop index a newly written entry before pinning it, and
+# how long to watch afterwards before believing the pin survived. Both are
+# generous because both are wrong-by-default: the failure they guard against
+# reports success at the time and only undoes itself afterwards.
+_INDEX_SETTLE_SECONDS = 3.0
+_CONFIRM_WINDOW_SECONDS = 12.0
+_PIN_ATTEMPTS = 3
+
+
+def _pin_and_confirm(entry_is_new: bool) -> str:
+    """Pin, then watch long enough to know whether it was allowed to stay.
+
+    GNOME Shell keeps its favourites as desktop-file *ids* and silently drops
+    any it cannot resolve. Write the entry and pin it in the same breath and the
+    Shell has not indexed the new file yet, so it prunes the pin - not at once,
+    but seconds later. gsettings reports success, an immediate check agrees, the
+    icon never appears, and nothing anywhere records that it failed. Checking
+    straight after writing is therefore worse than useless: it produces a
+    confident false positive, which is exactly how this shipped broken.
+
+    So: give the desktop time to notice a new entry first, and afterwards watch
+    for long enough to catch a late prune.
+    """
+    import time
+
+    if entry_is_new:
+        time.sleep(_INDEX_SETTLE_SECONDS)
+    def survives() -> bool:
+        """True if the pin is still there after the whole watch window.
+
+        Always checks at least once, however short the window: a confirmation
+        that can skip its own check is the false positive all over again.
+        """
+        deadline = time.monotonic() + _CONFIRM_WINDOW_SECONDS
+        while True:
+            if not is_pinned():
+                return False
+            if time.monotonic() >= deadline:
+                return True
+            time.sleep(1.0)
+
+    last = ""
+    for attempt in range(_PIN_ATTEMPTS):
+        last = add()
+        if survives():
+            return last
+        if attempt + 1 < _PIN_ATTEMPTS:
+            time.sleep(_INDEX_SETTLE_SECONDS)
+    return (f"{last} - but the desktop keeps removing it; it has probably not "
+            "indexed the new entry yet, and the next launch will try again")
 
 
 def status() -> str:
