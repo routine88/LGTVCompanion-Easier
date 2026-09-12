@@ -157,12 +157,8 @@ class Daemon:
         self._failing_since: Optional[float] = None
         self._next_diagnosis_at = 0.0
         self._diagnosing = False
-        self._escalated = False          # already interrupted the user this outage?
         self.diagnoses = 0               # self-checks run (observable)
         self.last_diagnosis = None       # selfheal.Diagnosis, or None
-        # Set by the GUI when it owns this daemon: there is already a window in
-        # front of the user, so opening a second one at them would be absurd.
-        self.has_ui = False
         # Set once the OS shutdown handler has (attempted to) power the TV off, so
         # the CLI's SIGTERM fallback doesn't fire a second, redundant power-off.
         self._shutdown_handled = False
@@ -397,7 +393,6 @@ class Daemon:
             return
         self._failing_since = None
         self._next_diagnosis_at = 0.0
-        self._escalated = False
         if self.last_diagnosis is not None:
             self.logger.info("The TV is reachable again.")
             self.last_diagnosis = None
@@ -450,50 +445,19 @@ class Daemon:
                 self._next_connect_at = 0.0
                 self._end_outage()
                 return
+            # Recorded and logged, and that is deliberately the whole of it. The
+            # app used to interrupt with a desktop notification and, for a
+            # cleared pairing, open the setup window by itself. Both turned out
+            # to be wrong often enough to be worse than useless: an interruption
+            # that is sometimes mistaken teaches people to distrust the accurate
+            # ones too. What is left says the same thing where the user is
+            # already looking - the status line, and the panel when they next
+            # open it.
             self.logger.warning("Self-check: %s", diagnosis.summary)
-            self._escalate(diagnosis)
         except Exception:  # noqa: BLE001 - a self-check must never kill the watcher
             self.logger.exception("The self-check hit an unexpected problem")
         finally:
             self._diagnosing = False
-
-    def _escalate(self, diagnosis) -> None:
-        """Interrupt the user - once per outage - but only when waiting cannot help.
-
-        A TV that is switched off is the normal overnight state and gets nothing.
-        A cleared pairing, a PC on the wrong network or a PC with no network at
-        all will still be broken tomorrow, so those are worth a notification; a
-        cleared pairing is the one the user can only fix in the setup window, so
-        that one opens it.
-        """
-        from . import notify
-        from . import selfheal
-        if not diagnosis.needs_user or self._escalated:
-            return
-        self._escalated = True
-        notify.notify("Easy Mode can't reach your TV", diagnosis.summary,
-                      urgency="critical")
-        if diagnosis.verdict == selfheal.VERDICT_PAIRING:
-            self._open_setup()
-
-    def _open_setup(self) -> None:
-        """Put the setup window in front of the user. Never raises.
-
-        Skipped when a window is already open (the GUI owns this daemon), when
-        there is no desktop to open it on, and when the tests say so - none of
-        which should stop the notification that has already gone out.
-        """
-        from . import branding
-        from . import notify
-        if self.has_ui or not notify.have_desktop():
-            return
-        if os.environ.get("LGTV_EASY_NO_AUTO_SETUP") == "1":
-            return
-        try:
-            proc.popen(branding.launch_command("gui", windowed=True))
-            self.logger.info("Opened the setup window: the TV needs re-pairing.")
-        except Exception as exc:  # noqa: BLE001
-            self.logger.warning("Could not open the setup window: %s", exc)
 
     def _drop_client(self) -> None:
         if self._client:

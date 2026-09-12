@@ -869,9 +869,6 @@ class App(tk.Tk):
         # it shells out to gsettings, and the window must not wait on that.
         threading.Thread(target=self._ensure_launcher_icon, daemon=True).start()
         self.daemon = Daemon(self.cfg)
-        # A window is already open in front of the user, so the watcher's
-        # self-check must not open a second one at them.
-        self.daemon.has_ui = True
         self.daemon.start()
 
     def watcher_holder(self):

@@ -38,7 +38,7 @@ class _Clock:
         self.now += seconds
 
 
-def _daemon(monkeypatch, verdict, *, has_ui=False):
+def _daemon(monkeypatch, verdict):
     """A daemon whose self-check returns ``verdict`` without touching a network."""
     cfg = Config()
     cfg.device = Device(name="t", ip="192.0.2.10", mac="AA:BB:CC:DD:EE:FF",
@@ -46,7 +46,6 @@ def _daemon(monkeypatch, verdict, *, has_ui=False):
     clock = _Clock()
     daemon = Daemon(cfg, clock_fn=clock, locator_fn=lambda mac: None,
                     logger=_quiet_logger())
-    daemon.has_ui = has_ui
     daemon._clock_obj = clock
 
     diagnosis = selfheal.Diagnosis(verdict=verdict, summary=f"summary for {verdict}",
@@ -56,15 +55,20 @@ def _daemon(monkeypatch, verdict, *, has_ui=False):
 
 
 @pytest.fixture(autouse=True)
-def no_real_escalation(monkeypatch, tmp_path):
-    """Never notify, never open a window, never write outside the tmp dir."""
-    sent = []
-    from lgtv_easy import notify
-    monkeypatch.setattr(notify, "notify",
-                        lambda title, message, **kw: sent.append((title, message)) or True)
-    monkeypatch.setenv("LGTV_EASY_NO_AUTO_SETUP", "1")
+def interruptions(monkeypatch, tmp_path):
+    """Catch anything the watcher tries to put in front of the user.
+
+    The app used to raise a desktop notification and, for a cleared pairing,
+    open the setup window on its own. Both were removed: they fired on a verdict
+    that was sometimes wrong, and an interruption that is sometimes mistaken
+    teaches people to distrust the accurate ones too. This fixture is what keeps
+    them from creeping back.
+    """
+    spawned = []
+    monkeypatch.setattr("lgtv_easy.proc.popen",
+                        lambda *a, **k: spawned.append(a))
     monkeypatch.setenv("LGTV_EASY_HOME", str(tmp_path))
-    return sent
+    return spawned
 
 
 # ----- when the check runs at all --------------------------------------------
@@ -114,101 +118,47 @@ def test_reconnecting_stands_the_watchdog_down(monkeypatch):
 
 
 # ----- what it does about the answer -----------------------------------------
-def test_a_tv_that_is_merely_off_never_interrupts_anyone(no_real_escalation,
-                                                         monkeypatch):
-    """The normal overnight state. Waking someone for it is how an app teaches
-    people to ignore it."""
-    daemon, clock, _ = _daemon(monkeypatch, selfheal.VERDICT_TV_OFF)
-    daemon._note_connect_failure(OSError("no route"))
-    clock.advance(DIAGNOSE_AFTER_SECONDS + 1)
-    daemon._diagnose_now()
-    assert no_real_escalation == []
-
-
-@pytest.mark.parametrize("verdict", list(selfheal.NEEDS_USER))
-def test_a_fault_that_cannot_fix_itself_notifies(no_real_escalation, monkeypatch,
-                                                 verdict):
+@pytest.mark.parametrize("verdict", [selfheal.VERDICT_TV_OFF,
+                                     selfheal.VERDICT_PAIRING,
+                                     selfheal.VERDICT_NO_NETWORK,
+                                     selfheal.VERDICT_WRONG_NETWORK,
+                                     selfheal.VERDICT_TV_NOT_ON_NETWORK])
+def test_no_verdict_interrupts_the_user(interruptions, monkeypatch, verdict):
+    """Not even the ones that need a human. The watcher records what it found
+    and says so where the user is already looking - the status line, and the
+    panel when they next open it - rather than pushing a window or a toast at
+    somebody who did not ask for one."""
     daemon, clock, _ = _daemon(monkeypatch, verdict)
     daemon._note_connect_failure(OSError("no route"))
     clock.advance(DIAGNOSE_AFTER_SECONDS + 1)
     daemon._diagnose_now()
-    assert len(no_real_escalation) == 1
-    assert no_real_escalation[0][1] == f"summary for {verdict}"
+    assert interruptions == [], f"{verdict} put something in front of the user"
 
 
-def test_the_user_is_interrupted_once_per_outage_not_once_per_check(
-        no_real_escalation, monkeypatch):
-    """The check repeats while the outage lasts. Repeating the notification with
-    it would put the same red box on screen every half hour, all night."""
+def test_the_app_no_longer_ships_a_notifier():
+    """Removed rather than left switched off: a dormant notifier is one import
+    away from coming back by accident."""
+    import importlib
+
+    with pytest.raises(ImportError):
+        importlib.import_module("lgtv_easy.notify")
+
+
+def test_the_daemon_has_no_way_to_open_a_window(monkeypatch):
+    daemon, _clock, _d = _daemon(monkeypatch, selfheal.VERDICT_PAIRING)
+    for gone in ("_escalate", "_open_setup"):
+        assert not hasattr(daemon, gone), f"{gone} is back"
+
+
+def test_every_verdict_is_still_recorded_and_logged(interruptions, monkeypatch):
+    """Quiet is not the same as silent. Removing the interruption must not
+    remove the finding - that is the whole point of the self-check."""
     daemon, clock, _ = _daemon(monkeypatch, selfheal.VERDICT_PAIRING)
     daemon._note_connect_failure(OSError("no route"))
     clock.advance(DIAGNOSE_AFTER_SECONDS + 1)
     daemon._diagnose_now()
-    daemon._diagnose_now()
-    daemon._diagnose_now()
-    assert len(no_real_escalation) == 1
-    assert daemon.diagnoses == 3
-
-
-def test_a_new_outage_may_interrupt_again(no_real_escalation, monkeypatch):
-    daemon, clock, _ = _daemon(monkeypatch, selfheal.VERDICT_PAIRING)
-    daemon._note_connect_failure(OSError("no route"))
-    clock.advance(DIAGNOSE_AFTER_SECONDS + 1)
-    daemon._diagnose_now()
-    daemon._end_outage()                       # TV came back
-    daemon._note_connect_failure(OSError("no route"))   # ...and went again
-    clock.advance(DIAGNOSE_AFTER_SECONDS + 1)
-    daemon._diagnose_now()
-    assert len(no_real_escalation) == 2
-
-
-def test_a_self_check_that_fixes_it_retries_at_once(monkeypatch):
-    """The check relocates the TV and persists the new address. Leaving the
-    inherited five-minute backoff in place would mean the app sat there, fixed,
-    doing nothing, for another five minutes."""
-    daemon, clock, _ = _daemon(monkeypatch, selfheal.VERDICT_RECOVERED)
-    daemon._note_connect_failure(OSError("no route"))
-    assert daemon._next_connect_at != 0.0      # a backoff is in force
-    clock.advance(DIAGNOSE_AFTER_SECONDS + 1)
-    daemon._diagnose_now()
-    assert daemon._connect_failures == 0
-    assert daemon._next_connect_at == 0.0
-    assert daemon._failing_since is None
-
-
-def test_a_window_that_is_already_open_is_not_opened_again(monkeypatch):
-    """The GUI runs its own watcher in-process. Spawning a second copy of the
-    app at somebody already looking at the first one is not a fix.
-
-    The guard sits in _open_setup rather than in the caller on purpose: the
-    notification must still go out, because a window that is open behind six
-    others is not the same as being told.
-    """
-    daemon, _clock, _diag = _daemon(monkeypatch, selfheal.VERDICT_PAIRING,
-                                    has_ui=True)
-    spawned = []
-    monkeypatch.setattr("lgtv_easy.proc.popen", lambda *a, **k: spawned.append(a))
-    monkeypatch.delenv("LGTV_EASY_NO_AUTO_SETUP", raising=False)
-    daemon._open_setup()
-    assert spawned == []
-    # ...and with no window open, the same call does spawn one.
-    daemon.has_ui = False
-    monkeypatch.setenv("DISPLAY", ":0")
-    daemon._open_setup()
-    assert len(spawned) == 1
-
-
-def test_only_a_cleared_pairing_opens_the_setup_window(monkeypatch,
-                                                       no_real_escalation):
-    """A TV on another network, or a PC with no network, is not something the
-    setup wizard can do anything about - notifying is the whole response."""
-    opened = []
-    for verdict in selfheal.NEEDS_USER:
-        daemon, _clock, diagnosis = _daemon(monkeypatch, verdict)
-        monkeypatch.setattr(daemon, "_open_setup",
-                            lambda v=verdict: opened.append(v))
-        daemon._escalate(diagnosis)
-    assert opened == [selfheal.VERDICT_PAIRING]
+    assert daemon.last_diagnosis.verdict == selfheal.VERDICT_PAIRING
+    assert selfheal.load_diagnosis().verdict == selfheal.VERDICT_PAIRING
 
 
 # ----- the verdict outlives the process --------------------------------------
