@@ -28,10 +28,14 @@ INSTALL IT
 
   Linux   : open a terminal in this folder and run
                 sh packaging/linux/install.sh
-            It adds the app to your applications menu with its own icon, puts a
-            shortcut on your desktop, pins it to your dock, and installs the
-            bits it needs (python3-tk and friends). No root needed.
+            It adds the app to your applications menu with its own icon and
+            installs the bits it needs (python3-tk and friends). No root needed.
             (--no-dock-icon and --no-desktop-icon if you would rather not.)
+
+            The first time you open the app after setup it asks - once -
+            whether you would like an icon on the desktop and on the taskbar.
+            Say no and it never asks again; say yes and it puts them back if
+            they ever go missing. Both are switches in the app's settings.
 
 Then open "LGTV Companion Easy Mode" from the dock, the desktop icon or your
 menu. The

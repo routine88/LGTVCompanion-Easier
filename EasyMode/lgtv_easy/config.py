@@ -133,6 +133,14 @@ class Config:
     device: Device = field(default_factory=Device)
 
     # ----- persistence -------------------------------------------------
+    # Does the user want a desktop icon, and one on the taskbar/dock? Tri-state
+    # on purpose: None means "never asked", which is different from "said no".
+    # The app asks once, when an icon it has no answer about is missing, and an
+    # answer of False is permanent - nobody should have to decline the same
+    # offer twice.
+    desktop_icon: Optional[bool] = None
+    taskbar_icon: Optional[bool] = None
+
     @classmethod
     def load(cls, path: Optional[str] = None) -> "Config":
         path = path or config_path()

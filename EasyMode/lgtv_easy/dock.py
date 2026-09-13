@@ -657,41 +657,74 @@ def _marker_path() -> Path:
     return Path(config_dir()) / PINNED_ONCE_MARKER
 
 
-def ensure_on_launch() -> str:
-    """Make the app's icon exist and, the first time only, put it on the dock.
+def pending_questions(cfg) -> "tuple[bool, bool]":
+    """(ask about the desktop icon?, ask about the taskbar icon?).
 
-    Called every time the app opens, because an icon that only ever appears if
-    you happen to run an installer is an icon most people never get. Two halves,
-    deliberately different:
+    An icon is only ever asked about when there is no answer on file *and* it is
+    not already there. Three rules, in order:
 
-    * the menu entry and its icons are *repaired* every launch. That is
-      correctness, not preference - a missing or spec-invalid entry is a bug
-      whoever's machine it is on.
-    * the dock pin happens **once**, and is remembered. After that the dock
-      belongs to the user, and if they take the icon off it stays off.
+    * an icon that exists is an icon the user is content with, so it is recorded
+      as wanted and never raised - nobody wants to be asked permission for
+      something they can already see;
+    * an icon they previously had and removed is recorded as unwanted, so the
+      old consent-free behaviour does not turn into a new question;
+    * anything still unanswered is worth exactly one question.
+    """
+    ask_desktop = ask_taskbar = False
+    if cfg.desktop_icon is None:
+        if desktop_shortcut().exists():
+            cfg.desktop_icon = True
+        else:
+            ask_desktop = True
+    if cfg.taskbar_icon is None:
+        if is_pinned():
+            cfg.taskbar_icon = True
+        elif _marker_path().exists():
+            # Pinned by an older build that never asked, and taken off again
+            # since. That is an answer, even though nobody was asked for it.
+            cfg.taskbar_icon = False
+        else:
+            ask_taskbar = True
+    return ask_desktop, ask_taskbar
 
-    Returns a line for the log. Never raises.
+
+def apply_preferences(cfg) -> str:
+    """Make the icons match what the user asked for. Never raises.
+
+    Run at every launch, so an icon that was wanted and has since been deleted
+    comes back. "No" is only ever honoured by *not creating* - an icon the user
+    made themselves is theirs, and this never deletes one.
+    """
+    done = []
+    try:
+        if cfg.desktop_icon and not desktop_shortcut().exists():
+            done.append("desktop shortcut restored"
+                        if ensure_desktop_shortcut() else
+                        "could not create the desktop shortcut")
+        if cfg.taskbar_icon and not is_pinned():
+            done.append(_pin_and_confirm(entry_is_new=False))
+    except Exception as exc:  # noqa: BLE001 - decoration, never fatal
+        return f"could not apply the icon preferences: {exc}"
+    return "; ".join(done) or "icons already as the user wants them"
+
+
+def ensure_on_launch(cfg=None) -> str:
+    """Repair the menu entry, then honour the user's icon preferences.
+
+    Two halves, deliberately different. The applications-menu entry and its
+    icons are repaired every launch whatever the user has said, because that is
+    correctness rather than preference: without it the app cannot be found in
+    the menu at all, and a spec-invalid entry is a bug on whoever's machine it
+    is. The desktop and taskbar icons are decorations *about* the user's own
+    desktop, so those are only ever placed with permission.
     """
     try:
-        entry_is_new = installed_entry() is None
         entry = ensure_entry()
         if entry is None:
             return "could not create the applications-menu entry"
-        marker = _marker_path()
-        if marker.exists():
-            return f"menu entry is in place ({entry.name}); dock left as the user set it"
-        result = _pin_and_confirm(entry_is_new)
-        if not is_pinned():
-            # Deliberately no marker: the pin did not take, so the next launch
-            # must try again. Writing "done" for something that did not happen
-            # is how an icon stays missing for ever.
-            return result
-        try:
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text("", encoding="utf-8")
-        except OSError:
-            pass
-        return result
+        if cfg is None:
+            return f"menu entry is in place ({entry.name})"
+        return apply_preferences(cfg)
     except Exception as exc:  # noqa: BLE001 - a decoration, never fatal
         return f"could not set up the launcher icon: {exc}"
 

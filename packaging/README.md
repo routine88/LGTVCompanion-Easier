@@ -135,7 +135,22 @@ delete each other's files.
 
 A menu entry is not somewhere anyone looks, and that is what "I installed it and
 there is no icon" actually means. `lgtv_easy/dock.py` puts the app on the strip
-people click, and both installers and both portable launchers call it:
+people click, and both installers and both portable launchers call it.
+
+**Desktop and taskbar icons are asked for, not assumed.** The app puts the
+question once - and only about an icon that is both unanswered and missing, so
+an icon already there is never queried and a "no" is never repeated. The answers
+live in the config as `desktop_icon` / `taskbar_icon`, tri-state so that "never
+asked" stays distinct from "said no". A "yes" is then maintained at every
+launch, so an icon that gets deleted comes back; a "no" is honoured by never
+creating one, and nothing in the launch path ever *deletes* an icon the user put
+there themselves. Only the switches in the settings panel do that, because there
+the user is moving a control labelled with exactly what it does.
+
+The applications-menu entry is deliberately outside all of this and repaired
+unconditionally: without it the app cannot be found in the menu at all, which is
+a bug rather than a decoration.
+
 
 ```sh
 lgtv-easy dock add       # or: remove, status

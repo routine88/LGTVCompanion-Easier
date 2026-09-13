@@ -3,6 +3,8 @@ import socket
 import sys
 import tempfile
 
+import pytest
+
 # Make the package importable when running tests from the repo without install.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -23,6 +25,33 @@ os.environ.setdefault("LGTV_EASY_FAKE_MEDIA", "0")
 # probes/discovery when a settings panel is built in a test; scenarios that want
 # it exercise selfheal/the repair dialog explicitly.
 os.environ.setdefault("LGTV_EASY_NO_SELFTEST", "1")
+
+# The launch-time "would you like an icon on the desktop / taskbar?" question is
+# a modal window. Nobody is there to answer it, and wait_window under a grab
+# never returns - so a single App() built in a test would hang the whole run.
+os.environ.setdefault("LGTV_EASY_NO_ICON_PROMPT", "1")
+
+
+@pytest.fixture(autouse=True)
+def _never_sweep_the_real_lan(monkeypatch):
+    """No test may send a packet to every host on this machine's networks.
+
+    netdiag.sweep_arp exists to provoke ARP replies from a whole subnet, and the
+    discovery fallback calls it. A GUI test that starts a scan on a worker
+    thread can outlive its own monkeypatching, at which point the *real*
+    discovery runs and sprays the developer's LAN - one run produced several
+    thousand refused-connection warnings from the fence below. The fence stops
+    the packets; this stops them being attempted.
+
+    A test that actually wants the sweep patches it back.
+    """
+    from lgtv_easy import netdiag
+
+    monkeypatch.setattr(netdiag, "sweep_arp", lambda settle=1.5: None)
+    # ...and nor may it probe every host already in the ARP table, which is what
+    # the discovery fallback does next.
+    monkeypatch.setattr(netdiag, "webos_hosts", lambda probe_timeout=0.6: [])
+    monkeypatch.setattr(netdiag, "lg_tv_hosts", lambda probe_timeout=1.5: [])
 
 # Point the config directory at a throwaway home for the whole run. Several code
 # paths persist what they learn (the TV's MAC, its address, which input this PC

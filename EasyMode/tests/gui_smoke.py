@@ -17,6 +17,11 @@ os.environ.setdefault("LGTV_EASY_NO_SLEEP_WATCH", "1")
 # Keep the panel's automatic startup self-test from firing real network probes;
 # the repair-dialog scenario below drives the repair flow explicitly instead.
 os.environ.setdefault("LGTV_EASY_NO_SELFTEST", "1")
+
+# The launch-time "would you like an icon on the desktop / taskbar?" question is
+# a modal window. Nobody is there to answer it, and wait_window under a grab
+# never returns - so a single App() built in a test would hang the whole run.
+os.environ.setdefault("LGTV_EASY_NO_ICON_PROMPT", "1")
 # The settings panel asks whether the app is on the dock, and offers a switch
 # that would pin it for real. Point that at a throwaway directory so building
 # the panel here can never rearrange the dock of whoever ran this.
@@ -67,8 +72,6 @@ def main():
 
     # Step 1: "Next" must be dead until the scan actually produces a TV, and the
     # wizard scans by itself - nobody should have to find a button to start it.
-    assert "disabled" in wizard.next_btn.state(), \
-        "Next was live before any TV had been found"
     # The scan runs on a worker thread, so wait on the clock rather than on a
     # fixed number of pumps: a busy machine schedules that thread late, and a
     # count that is generous on one box is a flaky failure on another.
@@ -77,6 +80,16 @@ def main():
         pump(app)
         time.sleep(0.02)
     assert wizard.found, "the wizard never scanned on its own"
+
+    # Now prove the gate, deterministically. Asserting "disabled" before the
+    # scan finishes is a race the mock always wins: it returns a TV instantly,
+    # so the button is legitimately live by the time anyone looks.
+    wizard._scan_done([])
+    pump(app)
+    assert "disabled" in wizard.next_btn.state(), \
+        "Next was live with nothing in the list"
+    wizard._scan_done([Discovered(ip="127.0.0.1", name="LG B-series", is_lg=True)])
+    pump(app)
     assert "disabled" not in wizard.next_btn.state(), \
         "Next stayed dead after a TV was found"
     assert wizard.selected_ip.get() == "127.0.0.1", "the found TV was not selected"

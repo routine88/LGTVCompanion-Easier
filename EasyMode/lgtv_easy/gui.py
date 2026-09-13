@@ -18,6 +18,7 @@ hand-drawn widgets (a pill toggle switch, an accent rule), so it stays dependenc
 """
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
@@ -574,6 +575,96 @@ def make_diagnosis_banner(parent: tk.Misc, diagnosis, on_repair=None,
     return card
 
 
+def icon_answers(asked: dict, answered: bool):
+    """Turn the dialog's switch states into preferences to store.
+
+    Kept out of the window function because this is where the two rules that
+    matter live - and because a modal Tk dialog cannot be driven reliably from a
+    test process that has already built other Tk roots, so the rules would
+    otherwise go untested.
+
+    * A question that was never put to the user comes back as None, not False.
+      Returning False would record a refusal nobody gave.
+    * A window closed without answering returns None overall: that is "not now",
+      and a permanent "no" has to be chosen rather than clicked past.
+    """
+    if not answered:
+        return None
+    return {key: (bool(asked[key].get()) if key in asked else None)
+            for key in ("desktop", "taskbar")}
+
+
+def ask_icon_preferences(parent, ask_desktop: bool, ask_taskbar: bool):
+    """Ask, once, where the user would like the app's icons. Never raises.
+
+    Returns ``{"desktop": bool|None, "taskbar": bool|None}`` - None for a
+    question that was not asked, so the caller leaves that preference alone.
+    Returns ``None`` entirely if the window was closed without answering, which
+    is deliberately *not* taken as a "no": a permanent refusal should come from
+    somebody choosing it, not from an accidental click on the X.
+    """
+    try:
+        win = tk.Toplevel(parent)
+    except tk.TclError:
+        return None
+    win.title("Shortcuts")
+    win.configure(bg=THEME["bg"])
+    win.resizable(False, False)
+    win.transient(parent)
+    branding.apply_icon(win)
+
+    body = ttk.Frame(win, padding=PAD + 6, style="TFrame")
+    body.pack(fill="both", expand=True)
+    ttk.Label(body, text="Where would you like Easy Mode?",
+              style="Title.TLabel").pack(anchor="w")
+    ttk.Label(body, text="Asked once. You can change either of these later in "
+                         "the app's settings.",
+              style="Sub.TLabel", wraplength=380,
+              justify="left").pack(anchor="w", pady=(4, PAD))
+
+    variables = {}
+    card = ttk.Frame(body, style="Card.TFrame", padding=PAD)
+    card.pack(fill="x")
+    for key, wanted, text in (("desktop", ask_desktop, "An icon on the desktop"),
+                              ("taskbar", ask_taskbar, "An icon on the taskbar")):
+        if not wanted:
+            continue
+        var = tk.BooleanVar(value=True)
+        variables[key] = var
+        row = ttk.Frame(card, style="Card.TFrame")
+        row.pack(fill="x", pady=4)
+        ttk.Label(row, text=text, style="Card.TLabel").pack(side="left")
+        ToggleSwitch(row, var, bg=THEME["surface"]).pack(side="right")
+
+    result = {"answered": False}
+
+    def done():
+        result["answered"] = True
+        win.destroy()
+
+    nav = ttk.Frame(body, style="TFrame")
+    nav.pack(fill="x", pady=(PAD, 0))
+    ttk.Button(nav, text="OK", style="Accent.TButton", command=done).pack(
+        side="right")
+
+    win.protocol("WM_DELETE_WINDOW", win.destroy)
+    win.update_idletasks()
+    # Centre on the parent rather than the screen: on a TV-sized display a
+    # screen-centred dialog can land a long way from the window it belongs to.
+    try:
+        x = parent.winfo_rootx() + (parent.winfo_width() - win.winfo_reqwidth()) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - win.winfo_reqheight()) // 3
+        win.geometry(f"+{max(0, x)}+{max(0, y)}")
+    except tk.TclError:
+        pass
+    try:
+        win.grab_set()
+        parent.wait_window(win)
+    except tk.TclError:
+        return None
+    return icon_answers(variables, result["answered"])
+
+
 def show_no_tv_alert(reason: str, dismiss_after: float = 300.0) -> None:
     """Standalone red warning window, for when there is no console to print to.
 
@@ -787,16 +878,72 @@ class App(tk.Tk):
             self.show_wizard()
 
     def _ensure_launcher_icon(self):
-        """Create the menu entry (and, once, the dock icon). Never raises."""
+        """Repair the menu entry, ask about icons if need be, then apply.
+
+        The repair and the applying both shell out and can take seconds, so they
+        stay on this worker thread; only the question itself goes back to the UI
+        thread, because Tk windows may only be built there.
+        """
+        from .applog import get_logger
+
         try:
             from . import dock as dock_mod
-            from .applog import get_logger
-            get_logger().info("Launcher icon: %s", dock_mod.ensure_on_launch())
+
+            entry = dock_mod.ensure_entry()
+            get_logger().info("Launcher icon: menu entry %s",
+                              "in place" if entry else "could NOT be created")
+            # Not during first-run setup: someone part-way through pairing a TV
+            # does not want a question about desktop decoration on top of it.
+            if not self.cfg.setup_complete:
+                return
+            ask_desktop, ask_taskbar = dock_mod.pending_questions(self.cfg)
+            # The question is a modal window, and a modal window in a test run
+            # is a deadlocked test run - wait_window under a grab never returns
+            # if nobody is there to press OK. Same guard the startup self-test
+            # already uses (LGTV_EASY_NO_SELFTEST), for the same reason.
+            if os.environ.get("LGTV_EASY_NO_ICON_PROMPT") == "1":
+                ask_desktop = ask_taskbar = False
+            if ask_desktop or ask_taskbar:
+                self.post(lambda: self._ask_icon_preferences(ask_desktop,
+                                                             ask_taskbar))
+                return
+            # pending_questions may have settled an unanswered preference by
+            # looking at what is already there; keep that.
+            self.cfg.save()
+            get_logger().info("Launcher icon: %s",
+                              dock_mod.apply_preferences(self.cfg))
         except Exception as exc:  # noqa: BLE001 - an icon is never worth a crash
             # Logged, not swallowed: a silent failure here is indistinguishable
             # from the icon simply never having been asked for, which is how
             # this went unnoticed in the first place.
             get_logger().warning("Could not set up the launcher icon: %s", exc)
+
+    def _ask_icon_preferences(self, ask_desktop, ask_taskbar):
+        """Put the question to the user (UI thread), then act on the answer."""
+        from .applog import get_logger
+
+        answers = ask_icon_preferences(self, ask_desktop, ask_taskbar)
+        if answers is None:
+            # Closed without answering. Not recorded as a refusal - a permanent
+            # "no" should come from somebody choosing it, not from a stray click
+            # on the window's X - so the question stands for next time.
+            get_logger().info("Launcher icon: the shortcuts question was "
+                              "dismissed; it will be asked once more.")
+            return
+        if answers["desktop"] is not None:
+            self.cfg.desktop_icon = answers["desktop"]
+        if answers["taskbar"] is not None:
+            self.cfg.taskbar_icon = answers["taskbar"]
+        self.cfg.save()
+        get_logger().info("Launcher icon: user chose desktop=%s taskbar=%s",
+                          self.cfg.desktop_icon, self.cfg.taskbar_icon)
+
+        def worker():
+            from . import dock as dock_mod
+            get_logger().info("Launcher icon: %s",
+                              dock_mod.apply_preferences(self.cfg))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def show_wizard(self):
         self._clear()
@@ -1272,6 +1419,8 @@ class SettingsPanel(ttk.Frame):
         self.while_playing = tk.BooleanVar(value=cfg.stay_on_while_playing)
         self.autostart = tk.BooleanVar(value=autostart_mod.is_enabled())
         self.dock = tk.BooleanVar(value=dock_mod.is_pinned())
+        self.desktop_icon = tk.BooleanVar(
+            value=dock_mod.desktop_shortcut().exists())
         self._status_dot = None
         self._build()
 
@@ -1428,6 +1577,8 @@ class SettingsPanel(ttk.Frame):
             self._switch_row(
                 more, f"Keep an icon on {dock_mod.BAR_NAME}", self.dock,
                 self._apply_dock)
+        self._switch_row(more, "Keep an icon on the desktop", self.desktop_icon,
+                         self._apply_desktop_icon)
         self._sync_deep_row()
 
         self._refresh_status()
@@ -1572,7 +1723,37 @@ class SettingsPanel(ttk.Frame):
         autostart_mod.set_enabled(self.autostart.get())
         self._refresh_status()
 
+    def _apply_desktop_icon(self):
+        """Create or delete the desktop shortcut, and remember the choice.
+
+        Deleting here is right where the launch-time check would never do it:
+        this is somebody moving a switch labelled with exactly what it does, not
+        the app inferring from an icon's absence that it should tidy up.
+        """
+        wanted = bool(self.desktop_icon.get())
+        self.app.cfg.desktop_icon = wanted
+        try:
+            if wanted:
+                dock_mod.ensure_desktop_shortcut()
+            else:
+                dock_mod.desktop_shortcut().unlink()
+        except OSError:
+            pass
+        try:
+            self.app.cfg.save()
+        except Exception:  # noqa: BLE001 - persistence is best-effort
+            pass
+        self.desktop_icon.set(dock_mod.desktop_shortcut().exists())
+
     def _apply_dock(self):
+        # Remember the choice as well as acting on it: without this the launch
+        # check would see a missing icon, find "yes" still on file, and put back
+        # the one the user has just switched off.
+        self.app.cfg.taskbar_icon = bool(self.dock.get())
+        try:
+            self.app.cfg.save()
+        except Exception:  # noqa: BLE001 - persistence is best-effort
+            pass
         dock_mod.set_pinned(self.dock.get())
         # The dock can decline - a shell that ignores the setting, a GSettings
         # write that failed - so show what is actually true now rather than what

@@ -205,34 +205,23 @@ def test_the_quick_launch_shortcut_lands_in_the_real_folder(monkeypatch,
 
 
 # ----- the icon has to appear without anyone running an installer ------------
-def test_launching_the_app_creates_the_menu_entry_and_pins_it_once():
-    """An icon you only get if you happened to run an installer is an icon most
-    people never get. The app makes it on launch instead."""
+# What the app places is now gated on the user's answer (see
+# tests/test_icon_consent.py). What is *not* gated is the applications-menu
+# entry: without it the app cannot be found in the menu at all, so it is
+# repaired at every launch whatever anyone has said.
+def test_launching_the_app_repairs_the_menu_entry():
     assert dock.installed_entry() is None
-    assert dock.is_pinned() is False
     dock.ensure_on_launch()
     assert dock.installed_entry() is not None
-    assert dock.is_pinned() is True
 
 
-def test_an_icon_the_user_removed_stays_removed():
-    """The dock belongs to the user. Putting back something they deliberately
-    dragged off it at every launch is how an app gets uninstalled."""
+def test_launching_the_app_places_no_icon_without_an_answer():
+    """An icon nobody ever gets is no use - and putting one on somebody's
+    desktop unasked is still not the app's call to make."""
     dock.ensure_on_launch()
-    assert dock.remove() is True
-    dock.ensure_on_launch()
-    assert dock.is_pinned() is False, "re-pinned an icon the user took off"
-
-
-def test_the_menu_entry_is_still_repaired_after_the_user_unpins():
-    """Preference and correctness are different things: the dock is theirs, a
-    missing or broken menu entry is a bug."""
-    dock.ensure_on_launch()
-    dock.remove()
-    dock.installed_entry().unlink()
-    dock.ensure_on_launch()
-    assert dock.installed_entry() is not None
     assert dock.is_pinned() is False
+    assert dock.desktop_shortcut().exists() is False
+
 
 
 # ----- the entry we write has to be legal ------------------------------------
@@ -290,22 +279,13 @@ def test_icons_are_installed_into_the_theme():
     assert dock.install_icons() == 0
 
 
-def test_a_pin_that_does_not_stick_leaves_no_done_marker(monkeypatch):
-    """GNOME keeps favourites as desktop ids and silently drops the ones it
-    cannot resolve - so a brand-new entry gets its pin pruned moments after it
-    is written. gsettings reports success and the icon never appears. Recording
-    "done" for that is how an icon stays missing for ever: the next launch has
-    to try again."""
-    monkeypatch.setattr(dock, "add", lambda **kw: "claimed success")
-    monkeypatch.setattr(dock, "is_pinned", lambda: False)
-    monkeypatch.setattr(dock, "_PIN_ATTEMPTS", 1)
-    monkeypatch.setattr(dock, "_CONFIRM_WINDOW_SECONDS", 0.0)
-    monkeypatch.setattr(dock, "_INDEX_SETTLE_SECONDS", 0.0)
-    dock.ensure_on_launch()
-    assert not dock._marker_path().exists(), "marked done for a pin that failed"
-
-
 def test_the_pin_is_retried_until_the_desktop_keeps_it(monkeypatch):
+    """GNOME keeps favourites as desktop ids and silently drops the ones it
+    cannot resolve, so a brand-new entry can have its pin pruned seconds after
+    it is written - gsettings reports success the whole time. Believing the
+    first check is how this shipped broken."""
+    from lgtv_easy.config import Config
+
     attempts = {"n": 0}
     stuck = {"v": False}
 
@@ -319,12 +299,13 @@ def test_the_pin_is_retried_until_the_desktop_keeps_it(monkeypatch):
     monkeypatch.setattr(dock, "_PIN_ATTEMPTS", 4)
     monkeypatch.setattr(dock, "_CONFIRM_WINDOW_SECONDS", 0.0)
     monkeypatch.setattr(dock, "_INDEX_SETTLE_SECONDS", 0.0)
-    dock.ensure_on_launch()
+    dock.apply_preferences(Config(taskbar_icon=True))
     assert attempts["n"] == 3
-    assert dock._marker_path().exists(), "a pin that stuck was not recorded"
 
 
 def test_a_pin_that_sticks_first_time_is_not_retried(monkeypatch):
+    from lgtv_easy.config import Config
+
     attempts = {"n": 0}
 
     def counting_add(**kw):
@@ -332,11 +313,13 @@ def test_a_pin_that_sticks_first_time_is_not_retried(monkeypatch):
         return "added"
 
     monkeypatch.setattr(dock, "add", counting_add)
-    monkeypatch.setattr(dock, "is_pinned", lambda: True)
+    monkeypatch.setattr(dock, "is_pinned", lambda: False)
     monkeypatch.setattr(dock, "_CONFIRM_WINDOW_SECONDS", 0.0)
     monkeypatch.setattr(dock, "_INDEX_SETTLE_SECONDS", 0.0)
-    dock.ensure_on_launch()
-    assert attempts["n"] == 1
+    monkeypatch.setattr(dock, "_PIN_ATTEMPTS", 3)
+    dock.apply_preferences(Config(taskbar_icon=True))
+    # is_pinned stays False, so it uses every attempt and gives up quietly.
+    assert attempts["n"] == 3
 
 
 def test_the_logger_does_not_double_up_across_imports():

@@ -7,6 +7,11 @@ import logging
 import pytest
 
 from lgtv_easy import cli, discovery, netdiag, recovery
+
+# conftest stubs webos_hosts for every test - no test may probe the real LAN.
+# Captured here at import time, before that fixture runs, for the one test
+# that is actually about webos_hosts.
+_REAL_WEBOS_HOSTS = netdiag.webos_hosts
 from lgtv_easy.config import Config, Device
 from lgtv_easy.daemon import Daemon
 from lgtv_easy.discovery import Discovered
@@ -278,6 +283,7 @@ def test_webos_hosts_finds_open_control_ports(monkeypatch):
     monkeypatch.setattr(
         netdiag, "speaks_webos",
         lambda ip, port, timeout=2.0: ip == "192.168.86.33")
+    monkeypatch.setattr(netdiag, "webos_hosts", _REAL_WEBOS_HOSTS)
     assert netdiag.webos_hosts() == ["192.168.86.33"]
 
 
