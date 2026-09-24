@@ -30,7 +30,9 @@ forgotten call site is enough to bring the flashing back.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
+from typing import Optional
 
 # CREATE_NO_WINDOW (winbase.h). Spelled out rather than taken from subprocess so
 # this module imports cleanly on Linux, where the constant does not exist.
@@ -78,6 +80,42 @@ def _merge(kwargs: dict) -> dict:
     if flags:
         merged["creationflags"] = flags
     return merged
+
+
+# ----- the operating system's own tools ---------------------------------------
+# Where a Linux distribution installs its programs. A user-level package manager
+# (Linuxbrew, Nix, conda) often puts its own ``gdbus`` earlier on PATH, built
+# against its own prefix: Linuxbrew's looks for the system bus under
+# /home/linuxbrew/.linuxbrew/var/run/dbus/ and fails. The session bus still
+# works, because its address comes from the environment - so everything looked
+# fine except logind, which is how PC-sleep and shutdown handling silently
+# switched off whenever the app was started from a terminal.
+_SYSTEM_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+
+# The D-Bus specification's well-known system bus address, used whenever the
+# environment doesn't name one. Every client falls back to its own compiled-in
+# default otherwise, and that is the one a foreign-prefix build gets wrong.
+SYSTEM_BUS_ADDRESS = "unix:path=/var/run/dbus/system_bus_socket"
+
+
+def system_tool(name: str) -> Optional[str]:
+    """Path to the OS's own copy of ``name``, else whatever PATH finds, else None."""
+    for d in _SYSTEM_DIRS:
+        path = os.path.join(d, name)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return shutil.which(name)
+
+
+def system_bus_env(environ=None) -> dict:
+    """An environment for a child that talks to the D-Bus *system* bus.
+
+    Names the bus explicitly (unless something already does), so the child
+    doesn't depend on the address baked in when it was built.
+    """
+    env = dict(os.environ if environ is None else environ)
+    env.setdefault("DBUS_SYSTEM_BUS_ADDRESS", SYSTEM_BUS_ADDRESS)
+    return env
 
 
 def run(args, **kwargs):

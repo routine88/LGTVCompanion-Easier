@@ -4,8 +4,13 @@ These exercise the daemon's suspend/resume handlers directly (no real OS power
 event needed) and check that the platform watcher factory is always safe to call.
 """
 import logging
+import os
+import stat
+import sys
 
-from lgtv_easy import system_sleep
+import pytest
+
+from lgtv_easy import proc, system_sleep
 from lgtv_easy.config import Config, Device
 from lgtv_easy.daemon import STATE_OFF, STATE_ON, STATE_STANDBY, Daemon
 from lgtv_easy.mock_tv import MockTV
@@ -198,3 +203,61 @@ def test_windows_notify_flag_is_callback_not_window_handle():
     real API: flags=0 returns 87, flags=2 registers.
     """
     assert system_sleep._WindowsWatcher._DEVICE_NOTIFY_CALLBACK == 2
+
+
+# ----- finding the OS's own D-Bus tools ------------------------------------
+# The bug: started from a terminal whose PATH put Linuxbrew first, the app ran
+# Linuxbrew's gdbus, which looks for the system bus under its own prefix. The
+# logind probe failed, and PC-sleep and shutdown handling quietly switched off
+# ("Not following PC sleep: no supported hook on this system").
+def _exe(path, body="#!/bin/sh\nexit 0\n"):
+    path.write_text(body)
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    return str(path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executables")
+def test_system_tool_prefers_the_os_copy_over_path(tmp_path, monkeypatch):
+    os_dir, brew_dir = tmp_path / "usr-bin", tmp_path / "brew-bin"
+    os_dir.mkdir(), brew_dir.mkdir()
+    ours = _exe(os_dir / "gdbus")
+    _exe(brew_dir / "gdbus")
+    monkeypatch.setattr(proc, "_SYSTEM_DIRS", (str(os_dir),))
+    monkeypatch.setenv("PATH", str(brew_dir))
+    assert proc.system_tool("gdbus") == ours
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executables")
+def test_system_tool_falls_back_to_path(tmp_path, monkeypatch):
+    brew_dir = tmp_path / "brew-bin"
+    brew_dir.mkdir()
+    theirs = _exe(brew_dir / "gdbus")
+    monkeypatch.setattr(proc, "_SYSTEM_DIRS", (str(tmp_path / "nothing"),))
+    monkeypatch.setenv("PATH", str(brew_dir))
+    assert proc.system_tool("gdbus") == theirs
+    assert proc.system_tool("no-such-tool-anywhere") is None
+
+
+def test_system_bus_env_names_the_bus_but_never_overrides_one():
+    env = proc.system_bus_env({"PATH": "/x"})
+    assert env["DBUS_SYSTEM_BUS_ADDRESS"] == proc.SYSTEM_BUS_ADDRESS
+    assert env["PATH"] == "/x"
+    mine = "unix:path=/custom/socket"
+    assert proc.system_bus_env(
+        {"DBUS_SYSTEM_BUS_ADDRESS": mine})["DBUS_SYSTEM_BUS_ADDRESS"] == mine
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="logind")
+def test_follows_pc_sleep_with_a_foreign_gdbus_first_on_path(tmp_path,
+                                                            monkeypatch):
+    """A gdbus that can only reach the system bus when told its address - what
+    Linuxbrew's is - must still yield the logind watcher."""
+    brew_dir = tmp_path / "brew-bin"
+    brew_dir.mkdir()
+    _exe(brew_dir / "gdbus",
+         '#!/bin/sh\n[ -n "$DBUS_SYSTEM_BUS_ADDRESS" ] || exit 1\nexit 0\n')
+    monkeypatch.setattr(proc, "_SYSTEM_DIRS", (str(tmp_path / "nothing"),))
+    monkeypatch.setenv("PATH", f"{brew_dir}:/usr/bin:/bin")
+    monkeypatch.delenv("DBUS_SYSTEM_BUS_ADDRESS", raising=False)
+    w = system_sleep.make_watcher(on_sleep=lambda: None, on_resume=lambda: None)
+    assert w.backend_name == "logind"

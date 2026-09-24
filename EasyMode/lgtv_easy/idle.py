@@ -99,7 +99,7 @@ def _gdbus_path() -> "str | None":
     PATH on every call)."""
     global _GDBUS_PATH
     if _GDBUS_PATH is None:
-        _GDBUS_PATH = shutil.which("gdbus") or False
+        _GDBUS_PATH = proc.system_tool("gdbus") or False
     return _GDBUS_PATH or None
 
 

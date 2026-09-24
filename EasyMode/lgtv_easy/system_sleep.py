@@ -24,7 +24,6 @@ thread-safe (the daemon serialises its TV actions with a lock).
 """
 from __future__ import annotations
 
-import shutil
 import subprocess
 import sys
 import threading
@@ -152,7 +151,8 @@ class _LogindWatcher:
                 [self._gdbus, "monitor", "--system",
                  "--dest", "org.freedesktop.login1",
                  "--object-path", "/org/freedesktop/login1"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                env=proc.system_bus_env())
         except Exception:  # noqa: BLE001
             self._release_delay_lock()
             raise
@@ -279,7 +279,8 @@ def _linux_logind_available(gdbus: str) -> bool:
             [gdbus, "call", "--system", "--dest", "org.freedesktop.login1",
              "--object-path", "/org/freedesktop/login1",
              "--method", "org.freedesktop.DBus.Peer.Ping"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
+            env=proc.system_bus_env())
         return res.returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -305,10 +306,12 @@ def make_watcher(on_sleep: Callable[[], None],
             ctypes.WinDLL("powrprof")  # probe: present on Windows 8+
             return _WindowsWatcher(on_sleep, on_resume, logger)
         if sys.platform.startswith("linux"):
-            gdbus = shutil.which("gdbus")
+            # The OS's own gdbus, not whichever PATH finds first (see
+            # proc.system_tool).
+            gdbus = proc.system_tool("gdbus")
             if gdbus and _linux_logind_available(gdbus):
                 return _LogindWatcher(on_sleep, on_resume, logger, gdbus,
-                                      shutil.which("systemd-inhibit"),
+                                      proc.system_tool("systemd-inhibit"),
                                       on_shutdown=on_shutdown)
     except Exception:  # noqa: BLE001 - fall back to the no-op watcher
         pass
