@@ -237,8 +237,9 @@ def test_follows_the_pc_to_a_new_socket_after_the_relearn_window():
         tv.foreground_app = "com.webos.app.hdmi3"  # replugged
         _advance(d, 60)
         d.tick()  # starts the clock on the new candidate
-        _advance(d, INPUT_RELEARN_SECONDS + 60)
-        d.tick()
+        for _ in range(int(INPUT_RELEARN_SECONDS // 60)):
+            _advance(d, 60)                        # a quarter-hour of use
+            d.tick()
         assert d.config.device.input_id == "hdmi3"
 
 

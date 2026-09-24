@@ -30,6 +30,9 @@ class MockTV:
         # switching the TV to another computer's HDMI socket. '' means the panel
         # won't say (older firmware), which the app treats as "unknown".
         self.foreground_app = "com.webos.app.hdmi1"
+        # What getExternalInputList reports, as a list of device dicts in the
+        # TV's own shape. None answers without a list, like older firmware.
+        self.input_list: Optional[list] = None
         self.pair_prompts = 0
         self.requests: list = []
         self._srv: Optional[socket.socket] = None
@@ -136,6 +139,9 @@ class MockTV:
             payload_out["state"] = "Active" if self.powered_on else "Suspend"
         elif uri.endswith("getForegroundAppInfo"):
             payload_out["appId"] = self.foreground_app
+        elif uri.endswith("getExternalInputList"):
+            if self.input_list is not None:
+                payload_out["devices"] = self.input_list
         ws.send_text(json.dumps({
             "type": "response", "id": msg.get("id"), "payload": payload_out,
         }))

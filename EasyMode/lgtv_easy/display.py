@@ -31,7 +31,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import FrozenSet, List, Optional
 
 # PnP vendor ids that mean LG. GSM is the one TVs use (it is Goldstar, LG's old
 # name); the other two turn up on LG-made laptop and monitor panels, which are
@@ -173,6 +173,91 @@ def _windows_panels() -> List[Panel]:
             except OSError:
                 continue
     return out
+
+
+# ----- graphics vendors --------------------------------------------------------
+# The PCI vendor ids of the graphics makers a PC-behind-an-HDMI-socket can have,
+# and the names those makers' drivers put in the HDMI "source product
+# description" the TV reports for each socket. Only these are ever compared:
+# anything else (a dock, an adapter, a games console) says nothing either way.
+_PCI_GPU_VENDORS = {0x1002: "amd", 0x10DE: "nvidia", 0x8086: "intel"}
+_SPD_GPU_VENDORS = (("nvidia", "nvidia"), ("amd", "amd"), ("ati", "amd"),
+                    ("intel", "intel"))
+
+
+def gpu_vendor_from_spd(name: str) -> str:
+    """'nvidia' for the SPD vendor "NVIDIA", '' for anything not a GPU maker."""
+    low = (name or "").strip().lower()
+    for prefix, vendor in _SPD_GPU_VENDORS:
+        if low.startswith(prefix):
+            return vendor
+    return ""
+
+
+def _linux_gpu_vendors(root: str = "/sys/bus/pci/devices") -> FrozenSet[str]:
+    found = set()
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return frozenset()
+    for entry in entries:
+        try:
+            with open(os.path.join(root, entry, "class"), encoding="utf-8") as fh:
+                if not fh.read().strip().lower().startswith("0x03"):
+                    continue  # PCI class 03: display controllers
+            with open(os.path.join(root, entry, "vendor"), encoding="utf-8") as fh:
+                vendor = _PCI_GPU_VENDORS.get(int(fh.read().strip(), 16))
+        except (OSError, ValueError):
+            continue
+        if vendor:
+            found.add(vendor)
+    return frozenset(found)
+
+
+def _windows_gpu_vendors() -> FrozenSet[str]:
+    """From the display-adapter device class in the registry: no subprocess."""
+    try:
+        import winreg
+    except ImportError:
+        return frozenset()
+    path = (r"SYSTEM\CurrentControlSet\Control\Class"
+            r"\{4d36e968-e325-11ce-bfc1-08002be10318}")
+    found = set()
+    try:
+        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path)
+    except OSError:
+        return frozenset()
+    with root:
+        for i in range(winreg.QueryInfoKey(root)[0]):
+            try:
+                with winreg.OpenKey(root, winreg.EnumKey(root, i)) as key:
+                    hw, _ = winreg.QueryValueEx(key, "MatchingDeviceId")
+            except OSError:
+                continue
+            m = re.search(r"ven_([0-9a-f]{4})", str(hw).lower())
+            vendor = _PCI_GPU_VENDORS.get(int(m.group(1), 16)) if m else None
+            if vendor:
+                found.add(vendor)
+    return frozenset(found)
+
+
+def gpu_vendors() -> FrozenSet[str]:
+    """Who made this PC's graphics: {'amd'}, {'intel', 'nvidia'}, ...
+
+    Every display adapter counts, so a laptop whose HDMI port hangs off either
+    of two GPUs is never mistaken for something else. Empty when it can't be
+    told, which callers must read as "no evidence", never as "no GPU".
+    """
+    if os.environ.get("LGTV_EASY_NO_EDID") == "1":
+        return frozenset()
+    try:
+        if sys.platform.startswith("win"):
+            return _windows_gpu_vendors()
+        if sys.platform.startswith("linux"):
+            return _linux_gpu_vendors()
+    except Exception:  # noqa: BLE001 - a diagnostic must never be the fault
+        pass
+    return frozenset()
 
 
 # ----- public -----------------------------------------------------------------

@@ -1,9 +1,9 @@
 name: Easy Mode tests
 
+# Manual only: the same checks run on the developer's machine before every
+# push (scripts/ci_local.sh, via the pre-push hook from scripts/install-hooks.sh).
+# Kept so a clean-runner pass - including the Windows leg - is one click away.
 on:
-  push:
-    branches: [master]
-  pull_request:
   workflow_dispatch:
 
 jobs:

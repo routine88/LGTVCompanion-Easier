@@ -7,8 +7,10 @@ issue requests such as turning the screen on/off.
 from __future__ import annotations
 
 import json
+import re
 import threading
-from typing import Optional
+from dataclasses import dataclass
+from typing import Dict, Optional
 
 from ._ws import WebSocket, WebSocketError
 
@@ -22,6 +24,7 @@ URI_CREATE_TOAST = "ssap://system.notifications/createToast"
 URI_GET_NETWORK_STATUS = "ssap://com.webos.service.connectionmanager/getStatus"
 URI_GET_SW_INFO = "ssap://com.webos.service.update/getCurrentSWInformation"
 URI_GET_FOREGROUND_APP = "ssap://com.webos.applicationManager/getForegroundAppInfo"
+URI_GET_INPUT_LIST = "ssap://tv/getExternalInputList"
 
 # WebOS names every source - a socket on the back or one of the TV's own apps -
 # with an appId. The sockets look like "com.webos.app.hdmi2"; the built-in apps
@@ -67,6 +70,58 @@ def is_external_input(input_id: str) -> bool:
     never be adopted as "my input".
     """
     return bool(input_id) and input_id.startswith(_EXTERNAL_PREFIXES)
+
+
+@dataclass
+class InputSource:
+    """What the TV knows about the device behind one of its sockets.
+
+    ``plugged`` is whether a cable is in the socket at all. ``vendor`` and
+    ``product`` come from the HDMI "source product description" the device
+    itself sends down the cable - a graphics card typically says "NVIDIA" /
+    "GeForce RTX 5070" there - and are empty when the device sends none (the
+    AMD driver on Linux, for one, does not).
+    """
+
+    plugged: bool = True
+    vendor: str = ""
+    product: str = ""
+
+    def describe(self) -> str:
+        return " ".join(x for x in (self.vendor, self.product) if x)
+
+
+def _input_id_of(device: dict) -> str:
+    """``hdmi2`` for a getExternalInputList entry, however the TV spells it."""
+    found = normalize_input_id(device.get("appId", ""))
+    if found:
+        return found
+    return re.sub(r"[\s_]", "", str(device.get("id", ""))).lower()
+
+
+def parse_input_list(payload: dict) -> Optional[Dict[str, InputSource]]:
+    """The TV's getExternalInputList answer, keyed by input id ('hdmi2').
+
+    None when the answer carries no device list - older firmware, or a TV that
+    refused - which callers must read as "can't tell", never as "no sockets".
+    """
+    devices = payload.get("devices") if isinstance(payload, dict) else None
+    if not isinstance(devices, list):
+        return None
+    out: Dict[str, InputSource] = {}
+    for dev in devices:
+        if not isinstance(dev, dict):
+            continue
+        input_id = _input_id_of(dev)
+        if not input_id:
+            continue
+        plugged = dev.get("hdmiPlugIn", dev.get("connected"))
+        out[input_id] = InputSource(
+            plugged=True if plugged is None else bool(plugged),
+            vendor=str(dev.get("spdVendorName") or "").strip(),
+            product=str(dev.get("spdProductDescription") or "").strip(),
+        )
+    return out
 
 
 def _normalize_mac(mac: str) -> str:
@@ -295,6 +350,14 @@ class WebOSClient:
         """
         payload = (self.request(URI_GET_FOREGROUND_APP) or {}).get("payload", {})
         return normalize_input_id(payload.get("appId", ""))
+
+    def get_input_sources(self) -> Optional[Dict[str, InputSource]]:
+        """What is plugged into each of the TV's sockets, or None if it won't say.
+
+        Raises on a dead socket, like :meth:`get_foreground_input`.
+        """
+        msg = self.request(URI_GET_INPUT_LIST) or {}
+        return parse_input_list(msg.get("payload", {}))
 
     def toast(self, message: str) -> Optional[dict]:
         return self.request(URI_CREATE_TOAST, {"message": message})

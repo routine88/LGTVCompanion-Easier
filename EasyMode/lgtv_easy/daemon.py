@@ -70,11 +70,25 @@ DEEP_WAKE_GIVEUP_SECONDS = 90.0
 # configured: it's whatever is on screen while this PC's user is at the keyboard.
 INPUT_SAMPLE_SECONDS = 10.0    # don't ask the TV more often than this
 INPUT_CACHE_SECONDS = 30.0     # how long a sample stays usable as "what's on now"
-# How long a *different* input must hold, across active use, before we accept
-# that this PC has been moved to another socket. Long enough that working at
-# this PC for a while with the other machine on screen (a second monitor on the
-# desk) can't hand ownership of the panel to the wrong computer.
+# "At the keyboard", for learning: real input this recent. Not the idle timeout,
+# which can be most of an hour - far too loose to say who is on screen.
+INPUT_ACTIVE_SECONDS = 30.0
+# How often to re-read what the TV says is plugged into each socket.
+INPUT_SOURCES_SECONDS = 300.0
+# When the TV confirms this PC's old socket is empty - the cable really moved -
+# how long the new input must hold, across active use, before we follow it.
+INPUT_MOVED_SECONDS = 60.0
+# The fallback for a TV that won't list its sockets: how long a *different*
+# input must hold, across unbroken active use, before we accept that this PC
+# has been moved. Long enough that working at this PC for a while with the
+# other machine on screen can't hand ownership of the panel to the wrong
+# computer.
 INPUT_RELEARN_SECONDS = 900.0
+# A gap longer than this in the active sightings of a rival input restarts its
+# clock, so two stray sightings a quarter of an hour apart don't add up to
+# "held for fifteen minutes".
+INPUT_EVIDENCE_GAP_SECONDS = 120.0
+_VENDOR_NAMES = {"amd": "AMD", "nvidia": "NVIDIA", "intel": "Intel"}
 
 
 class Daemon:
@@ -82,6 +96,7 @@ class Daemon:
         self,
         config: Config,
         client_factory: Optional[Callable[[], WebOSClient]] = None,
+        gpu_vendors_fn: Optional[Callable[[], frozenset]] = None,
         idle_fn: Optional[Callable[[], float]] = None,
         media_fn: Optional[Callable[[], bool]] = None,
         media_detail_fn: Optional[Callable[[], str]] = None,
@@ -114,6 +129,10 @@ class Daemon:
         # Given the TV's MAC, return its current IP on the LAN (or None). Used to
         # recover automatically when DHCP moves the TV to a new address.
         self._locator_fn = locator_fn or self._default_locator
+        # Who made this PC's graphics ({'amd'}), to recognise another computer
+        # from what the TV says is behind each socket. Injectable for tests.
+        self._gpu_vendors_fn = gpu_vendors_fn or self._default_gpu_vendors
+        self._gpu_vendors: Optional[frozenset] = None
         self._sleep_watcher: Optional[object] = None
         self._client: Optional[WebOSClient] = None
         self.screen_state = STATE_ON  # assume the screen is on at startup
@@ -168,6 +187,12 @@ class Daemon:
         self._next_input_sample_at = 0.0
         self._input_candidate = ""       # a rival input seen while the user is here
         self._input_candidate_since = 0.0
+        self._input_candidate_last = 0.0  # its latest active sighting
+        # What the TV says is behind each socket (webos.InputSource by input
+        # id), None until read or if the TV won't say.
+        self._sources: Optional[dict] = None
+        self._next_sources_at = 0.0
+        self._noted_other_pc: set = set()  # sockets already logged as not us
         self._skipped_input = ""         # last input we declined to act on (log once)
         # When this PC last became the source on screen. Held at "now" for as
         # long as the TV is showing something else (see _note_visibility), so
@@ -183,6 +208,11 @@ class Daemon:
     # ----- TV connection ----------------------------------------------
     def _default_client_factory(self) -> WebOSClient:
         return WebOSClient(self.config.device.ip, secure=self.config.device.secure)
+
+    @staticmethod
+    def _default_gpu_vendors() -> frozenset:
+        from .display import gpu_vendors
+        return gpu_vendors()
 
     def _default_locator(self, mac: str) -> Optional[str]:
         """Find the TV again after it moved - but only the TV we paired with.
@@ -596,6 +626,10 @@ class Daemon:
         first used to blank the panel while the other one was on screen and in
         use.
 
+        Also no when the source on screen is provably another computer - the TV
+        says a different make of graphics card is behind that socket - even
+        before this PC's own input has been learned.
+
         Fails open (yes) whenever the answer isn't known - the guard is off, we
         haven't learned this PC's input yet, or the TV won't say - so a single-PC
         setup behaves exactly as it did before.
@@ -603,26 +637,30 @@ class Daemon:
         if not self.config.only_my_input:
             return True
         mine = self.config.device.input_id
-        if not mine:
+        # Only a cached reading of the sockets here: this runs on the PC-suspend
+        # path, which has no time for a second round trip.
+        if not mine and not self._sources:
             return True
         seen = self._read_input(client, max_age)
-        if not seen or seen == mine:
+        other = bool(seen) and self._other_pc_behind(seen) is not None
+        if not seen or (not other and (not mine or seen == mine)):
             self._skipped_input = ""
             return True
         if seen != self._skipped_input:
             self._skipped_input = seen
             self.logger.info(
                 "Not %s: the TV is showing %s and this PC is on %s. Another "
-                "source is on screen, so leaving the TV alone.", what, seen, mine)
+                "source is on screen, so leaving the TV alone.", what, seen,
+                mine or "a different input")
         return False
 
     def _sample_input(self, active: bool) -> None:
         """Refresh - and while the user is here, learn from - the TV's source.
 
         Throttled to INPUT_SAMPLE_SECONDS so the idle loop costs one small
-        request every few polls, and skipped entirely when the guard is off.
-        Uses the ordinary (backed-off) connect, so an unreachable TV doesn't
-        turn this into a connect storm.
+        request every few polls (plus the socket list every few minutes), and
+        skipped entirely when the guard is off. Uses the ordinary (backed-off)
+        connect, so an unreachable TV doesn't turn this into a connect storm.
         """
         if not self.config.only_my_input:
             return
@@ -636,17 +674,101 @@ class Daemon:
             if not client:
                 return
             seen = self._read_input(client, max_age=0.0)
+            self._refresh_sources(client)
+            self._check_own_input()
             if seen and active and self.screen_state == STATE_ON:
-                self._learn_input(seen)
+                self._learn_input(client, seen)
 
-    def _learn_input(self, seen: str) -> None:
+    def _refresh_sources(self, client: WebOSClient, force: bool = False) -> None:
+        """Re-read what the TV says is behind each socket, every few minutes.
+
+        A failure keeps the last good answer: which card sits behind a socket
+        only changes when somebody moves a cable.
+        """
+        now = self._clock()
+        if not force and now < self._next_sources_at:
+            return
+        self._next_sources_at = now + INPUT_SOURCES_SECONDS
+        try:
+            sources = client.get_input_sources()
+        except Exception as exc:  # noqa: BLE001 - unknown is a valid answer
+            self.logger.debug("Could not read the TV's input list: %s", exc)
+            return
+        if sources is not None or self._sources is None:
+            self._sources = sources
+
+    def _other_pc_behind(self, input_id: str) -> Optional[str]:
+        """Describe the other computer behind ``input_id``, or None.
+
+        Non-None only on hard evidence: the TV says the device on that socket
+        announces itself as a graphics card from a maker this PC has none of
+        (an NVIDIA card, on a machine with only AMD graphics). No socket list,
+        no announcement, a maker we don't recognise, or not knowing our own
+        graphics - all of those are None, meaning "could be us".
+        """
+        src = (self._sources or {}).get(input_id)
+        if src is None or not src.vendor:
+            return None
+        from .display import gpu_vendor_from_spd
+        theirs = gpu_vendor_from_spd(src.vendor)
+        if self._gpu_vendors is None:
+            try:
+                self._gpu_vendors = frozenset(self._gpu_vendors_fn() or ())
+            except Exception:  # noqa: BLE001 - no evidence, not an error
+                self._gpu_vendors = frozenset()
+        if not theirs or not self._gpu_vendors or theirs in self._gpu_vendors:
+            return None
+        return src.describe()
+
+    def _note_other_pc(self, input_id: str, who: str) -> None:
+        if input_id in self._noted_other_pc:
+            return
+        self._noted_other_pc.add(input_id)
+        from .webos import input_label
+        self.logger.info(
+            "The TV's %s input is another computer (%s; this PC has %s "
+            "graphics), so it will never be taken for this PC.",
+            input_label(input_id), who,
+            " + ".join(sorted(_VENDOR_NAMES.get(v, v)
+                              for v in (self._gpu_vendors or ()))))
+
+    def _check_own_input(self) -> None:
+        """Drop a remembered input that the TV proves belongs to another PC.
+
+        Undoes a past mislearn - e.g. this PC was used remotely while the other
+        machine was on screen - rather than leaving it to blank that machine.
+        """
+        mine = self.config.device.input_id
+        who = self._other_pc_behind(mine) if mine else None
+        if who is None:
+            return
+        self._note_other_pc(mine, who)
+        self.config.device.input_id = ""
+        self._input_candidate = ""
+        self._skipped_input = ""
+        try:
+            self.config.save()
+        except Exception:  # noqa: BLE001 - persistence is best-effort
+            pass
+        self.logger.warning(
+            "Easy Mode had this PC down as the TV's %s input, but that is "
+            "another computer (%s). Forgetting it; this PC's own input will be "
+            "learned again the next time it is on screen.", mine, who)
+
+    def _learn_input(self, client: WebOSClient, seen: str) -> None:
         """Work out which socket this PC occupies, from the TV itself.
 
         The rule: whatever the TV is showing while this PC's user is actually at
-        the keyboard is this PC. Nothing to configure, and it still follows a
-        cable moved to a different socket - but only once the new input has held
-        for INPUT_RELEARN_SECONDS of active use, so a stretch of typing here
-        while the other machine is on screen can't quietly steal the panel.
+        the keyboard is this PC - unless the TV says a different make of
+        graphics card is behind that socket, which settles it the other way.
+
+        Once learned, a different input takes over only when the cable has
+        evidently moved: the TV reports this PC's old socket empty, and the new
+        input then holds for INPUT_MOVED_SECONDS of active use. Using this PC
+        while the other machine is on screen - remotely, or with a keyboard
+        shared between them - can't steal the panel however long it goes on.
+        A TV that won't list its sockets falls back to INPUT_RELEARN_SECONDS of
+        unbroken active use.
         """
         from .webos import is_external_input
         if not is_external_input(seen):
@@ -655,14 +777,39 @@ class Daemon:
         if seen == mine:
             self._input_candidate = ""
             return
+        who = self._other_pc_behind(seen)
+        if who is not None:
+            self._note_other_pc(seen, who)
+            if self._input_candidate == seen:
+                self._input_candidate = ""
+            return
         if not mine:
             self._adopt_input(seen, "learned from the TV")
             return
+        if self._sources is None:
+            hold = INPUT_RELEARN_SECONDS
+        else:
+            # The list is a few minutes old at most; before following a rival,
+            # make sure our old socket is still empty right now.
+            self._refresh_sources(client, force=self._input_candidate != seen)
+            old = (self._sources or {}).get(mine)
+            if old is None:
+                hold = INPUT_RELEARN_SECONDS   # our socket isn't listed: can't tell
+            elif old.plugged:
+                # Our socket still has a cable in it, so the rival is a second
+                # device - this PC has not moved.
+                self._input_candidate = ""
+                return
+            else:
+                hold = INPUT_MOVED_SECONDS
         now = self._clock()
-        if seen != self._input_candidate:
-            self._input_candidate, self._input_candidate_since = seen, now
+        if (seen != self._input_candidate
+                or now - self._input_candidate_last > INPUT_EVIDENCE_GAP_SECONDS):
+            self._input_candidate = seen
+            self._input_candidate_since = self._input_candidate_last = now
             return
-        if now - self._input_candidate_since >= INPUT_RELEARN_SECONDS:
+        self._input_candidate_last = now
+        if now - self._input_candidate_since >= hold:
             self._adopt_input(seen, f"moved from {mine}")
 
     def _adopt_input(self, seen: str, how: str) -> None:
@@ -969,7 +1116,8 @@ class Daemon:
         # in standby: the TV is off the network there, and asking would only
         # trip the "can't connect" warning.
         if self.screen_state != STATE_STANDBY:
-            self._sample_input(active=raw_idle < threshold)
+            self._sample_input(
+                active=raw_idle < min(threshold, INPUT_ACTIVE_SECONDS))
         # ...but every decision below runs on time-on-screen, which is what the
         # user actually experiences (see _effective_idle).
         idle = self._effective_idle(raw_idle)
