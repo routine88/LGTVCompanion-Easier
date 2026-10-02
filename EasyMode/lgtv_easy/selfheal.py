@@ -271,6 +271,18 @@ def _repair_impl(cfg, res, saved, out, *, persist, connect, blink, on_prompt,
             res.summary = f"Your TV is responding at {res.new_ip}. ✓"
             return res
 
+    # ----- step 2b: lit but deaf? wake its network -----------------------
+    # Only for a person who asked; the watcher does its own, stricter version
+    # (Daemon._maybe_wake_network). Not when the ports answered: then the
+    # network is awake and the problem is something else.
+    if allow_guess and not saved_reachable:
+        from .recovery import wake_lit_tv
+        if wake_lit_tv(cfg, out) and saved and try_connect(
+                cfg.device.ip, "Reconnecting to the saved address"):
+            res.summary = (f"Your TV's network connection had gone to sleep. "
+                           f"Woke it up, and it's responding at {res.new_ip}. ✓")
+            return res
+
     # ----- step 3-4: the saved address is dead - find the TV again --------
     out("The saved address didn't lead to a working connection; "
         "searching the network for the TV...")
@@ -341,10 +353,16 @@ VERDICT_WRONG_NETWORK = "wrong-network"  # PC and TV are on different subnets
 # the opposite - "wait, it will come back" is wrong, and waiting is what the app
 # did for two days while the user watched it do nothing.
 VERDICT_TV_NOT_ON_NETWORK = "tv-not-on-network"
+# Lit on the cable, and its MAC *is* on this network, yet nothing answers: the
+# TV's network connection has gone to sleep while the TV stayed on. Seen
+# 2026-10-02 - mistaken for a TV on another Wi-Fi, which sent the advice off in
+# the wrong direction. A Wake-on-LAN burst revives it; the watcher sends one
+# while someone is at the PC.
+VERDICT_TV_NETWORK_ASLEEP = "tv-network-asleep"
 
 # The verdicts that will not improve on their own, however long we wait.
 NEEDS_USER = (VERDICT_PAIRING, VERDICT_NO_NETWORK, VERDICT_WRONG_NETWORK,
-              VERDICT_TV_NOT_ON_NETWORK)
+              VERDICT_TV_NOT_ON_NETWORK, VERDICT_TV_NETWORK_ASLEEP)
 
 
 @dataclass
@@ -411,6 +429,9 @@ def _classify(cfg: Config, res: RepairResult) -> str:
     try:
         from . import display
         if display.tv_is_physically_on():
+            # Our MAC still answering ARP means it is on this network after all.
+            if cfg.device.mac and netdiag.ip_for_mac(cfg.device.mac):
+                return VERDICT_TV_NETWORK_ASLEEP
             return VERDICT_TV_NOT_ON_NETWORK
     except Exception:  # noqa: BLE001 - no display, no opinion
         pass
@@ -434,14 +455,22 @@ def diagnose(cfg: Config, *, log: Optional[Callable[[str], None]] = None,
     verdict = _classify(cfg, res)
     summary = res.summary or ("The TV is reachable." if res.ok else
                               "Could not reach the TV.")
-    if verdict == VERDICT_TV_NOT_ON_NETWORK:
-        seen = ""
+    seen = ""
+    if verdict in (VERDICT_TV_NOT_ON_NETWORK, VERDICT_TV_NETWORK_ASLEEP):
         try:
             from . import display
             panel = display.lg_panel()
             seen = f" ({panel.describe()})" if panel else ""
         except Exception:  # noqa: BLE001
             pass
+    if verdict == VERDICT_TV_NETWORK_ASLEEP:
+        summary = (
+            f"Your TV is switched on - this PC can see it on its display "
+            f"cable{seen} - and it is on this network, but it has stopped "
+            "answering: its network connection seems to have gone to sleep. "
+            "Easy Mode sends it a wake-up signal while you're using this PC. If "
+            "it stays unreachable, switch the TV off and on with the remote.")
+    if verdict == VERDICT_TV_NOT_ON_NETWORK:
         summary = (
             f"Your TV is switched on - this PC can see it on its display "
             f"cable{seen} - but nothing on the network answers it. Its Wi-Fi is "

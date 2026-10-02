@@ -122,7 +122,8 @@ def test_reconnecting_stands_the_watchdog_down(monkeypatch):
                                      selfheal.VERDICT_PAIRING,
                                      selfheal.VERDICT_NO_NETWORK,
                                      selfheal.VERDICT_WRONG_NETWORK,
-                                     selfheal.VERDICT_TV_NOT_ON_NETWORK])
+                                     selfheal.VERDICT_TV_NOT_ON_NETWORK,
+                                     selfheal.VERDICT_TV_NETWORK_ASLEEP])
 def test_no_verdict_interrupts_the_user(interruptions, monkeypatch, verdict):
     """Not even the ones that need a human. The watcher records what it found
     and says so where the user is already looking - the status line, and the

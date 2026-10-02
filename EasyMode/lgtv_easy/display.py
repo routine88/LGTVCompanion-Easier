@@ -297,3 +297,17 @@ def tv_is_physically_on() -> bool:
     """
     panel = lg_panel()
     return bool(panel and panel.powered)
+
+
+def panel_is_lit(identity: str = "") -> bool:
+    """True when the LG panel on this PC's cable is lit - and, given the
+    identity setup pinned (``Device.panel``), only if it is that panel.
+
+    "Lit" is the connector's word for it, not the TV's: some sets keep the
+    connector live in standby. Callers that act on it - a Wake-on-LAN burst
+    switches a TV on - need a person at the PC as well.
+    """
+    panel = lg_panel()
+    if not panel or not panel.powered:
+        return False
+    return not identity or panel.identity == identity

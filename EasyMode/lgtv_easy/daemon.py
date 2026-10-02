@@ -55,6 +55,15 @@ DIAGNOSE_AFTER_SECONDS = 120.0
 # the answer rarely changes and each check sweeps the LAN.
 DIAGNOSE_REPEAT_SECONDS = 1800.0
 
+# A TV can be switched on - lit, showing this PC - and still drop every packet
+# sent to it: it answers ARP, ignores everything else, and comes back the instant
+# a sustained Wake-on-LAN burst lands (seen 2026-10-02; the outage of 09-30 was
+# five hours of this). So once the TV has been silent this long, and only while
+# the cable shows our TV lit and someone is at the keyboard, send it one. Short
+# of the self-check, so the check sees the result rather than the problem.
+NETWORK_WAKE_AFTER_SECONDS = 60.0
+NETWORK_WAKE_REPEAT_SECONDS = 300.0
+
 # How long to keep trying to wake a fully-powered-off TV (with Wake-on-LAN) on
 # user activity before concluding WoL can't reach it on this network - e.g. a
 # Wi-Fi TV behind a mesh router that won't forward magic packets to a sleeping
@@ -105,6 +114,7 @@ class Daemon:
         sleep_watcher_factory: Optional[Callable[..., object]] = None,
         locator_fn: Optional[Callable[[str], Optional[str]]] = None,
         wol_fn: Optional[Callable[[bool], None]] = None,
+        panel_on_fn: Optional[Callable[[], bool]] = None,
         logger=None,
     ):
         self.config = config
@@ -119,6 +129,9 @@ class Daemon:
         # real packets (or sleep through a sustained burst). Takes one arg: True
         # when waking from full standby (sustained burst), False for screen-off.
         self._wol_fn = wol_fn or self._default_wol
+        # "Is our TV lit on this PC's display cable?" Injectable so tests never
+        # read the real sysfs.
+        self._panel_on_fn = panel_on_fn or self._default_panel_on
         # The default poll-sleep waits on an event so a settings change can cut
         # it short and apply at once (see _interruptible_sleep). Tests inject a
         # deterministic sleep_fn and bypass this.
@@ -165,6 +178,9 @@ class Daemon:
         # written to disk until the TV at that address accepts our pairing key -
         # see _relocate. None when there is no unconfirmed move in flight.
         self._unconfirmed_from: Optional[str] = None
+        # Network-wake state (see NETWORK_WAKE_AFTER_SECONDS).
+        self._next_network_wake_at = 0.0
+        self.network_wakes = 0           # bursts sent to a lit, silent TV
         # Deep-off recovery: track how long we've been failing to wake the TV
         # from full standby so we can give up (and disable deep-off) rather than
         # strand it forever if WoL can't reach it. None = not currently failing.
@@ -242,6 +258,14 @@ class Daemon:
         try:
             return self._connect_once()
         except Exception as exc:  # noqa: BLE001 - network errors are expected
+            # Lit but deaf: wake its network first. The burst is addressed to
+            # the MAC, so it also revives a TV that DHCP has meanwhile moved,
+            # which the relocate below can then actually connect to.
+            if self._maybe_wake_network():
+                try:
+                    return self._connect_once()
+                except Exception as exc_woken:  # noqa: BLE001
+                    exc = exc_woken
             # The saved IP didn't answer. DHCP routinely re-addresses the TV, so
             # before giving up, try to find it again (by its unchanging MAC, or
             # by discovery) and retry at the new address if it has moved.
@@ -255,6 +279,53 @@ class Daemon:
             self._note_connect_failure(exc)
             self._client = None
             return None
+
+    def _default_panel_on(self) -> bool:
+        """True when the TV on this PC's display cable is lit - and, once setup
+        has recorded which panel that is, only if it is that one."""
+        from . import display
+        return display.panel_is_lit(self.config.device.panel)
+
+    def _maybe_wake_network(self) -> bool:
+        """Send a Wake-on-LAN burst to a TV that is lit but not answering.
+
+        Every condition is there because a burst to a TV that is really off
+        switches it on. The display cable is the evidence that it is on, but
+        some sets keep the connector live in standby, so it is not enough alone:
+        someone must also be at the keyboard - the case in which the watcher
+        already turns the TV on - and the silence must have outlasted the
+        moment of somebody pressing the remote's power button mid-session.
+        Never after our own deep power-off; waking from that is wake_screen's
+        job. Returns True when a burst went out, so the caller retries.
+        """
+        mac = self.config.device.mac
+        if not mac or self.screen_state == STATE_STANDBY:
+            return False
+        now = self._clock()
+        if (self._failing_since is None
+                or now - self._failing_since < NETWORK_WAKE_AFTER_SECONDS
+                or now < self._next_network_wake_at):
+            return False
+        try:
+            if self._idle_fn() >= INPUT_ACTIVE_SECONDS:
+                return False
+            if not self._panel_on_fn():
+                return False
+        except Exception:  # noqa: BLE001 - no evidence, no burst
+            return False
+        self._next_network_wake_at = now + NETWORK_WAKE_REPEAT_SECONDS
+        self.logger.info(
+            "The TV is lit on this PC's display cable and you're at the PC, but "
+            "it hasn't answered on the network for %.0f minute(s) - sending a "
+            "Wake-on-LAN burst to wake its network connection.",
+            max(1.0, (now - self._failing_since) / 60.0))
+        try:
+            self._wol_fn(True)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("Network wake burst failed: %s", exc)
+            return False
+        self.network_wakes += 1
+        return True
 
     def _connect_once(self) -> WebOSClient:
         """Open and register one connection to the TV at the configured IP.
@@ -951,12 +1022,11 @@ class Daemon:
         mac = self.config.device.mac
         if not mac:
             return
-        from .wol import wake_targets
-        targets = wake_targets(self.config.device.ip)
+        from .wol import wake_burst, wake_targets
         if deep:
-            send_wol(mac, broadcast=targets, repeat=20, interval=0.25)
+            wake_burst(mac, self.config.device.ip)
         else:
-            send_wol(mac, broadcast=targets)
+            send_wol(mac, broadcast=wake_targets(self.config.device.ip))
 
     def wake_screen(self) -> bool:
         """Bring the screen back. Deliberately *not* gated on which input is

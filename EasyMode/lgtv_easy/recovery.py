@@ -14,6 +14,34 @@ from .config import Config
 from .webos import WebOSClient, pair_with_fallback
 
 
+def wake_lit_tv(cfg: Config, log: Callable[[str], None]) -> bool:
+    """Wake the network of a TV that is lit on this PC's cable but silent.
+
+    The TV can be on and showing this PC while dropping every packet sent to it;
+    a sustained Wake-on-LAN burst brings its network back at once. For callers
+    with a person at the PC who asked for the TV - a burst to a set that is
+    really in standby switches it on, which is what they asked for. (The watcher
+    has its own, stricter version: Daemon._maybe_wake_network.) Returns True
+    when a burst went out. Never raises.
+    """
+    if not cfg.device.mac:
+        return False
+    try:
+        from . import display
+        if not display.panel_is_lit(cfg.device.panel):
+            return False
+        log("Your TV is lit on this PC's display cable but isn't answering on "
+            "the network - sending it a Wake-on-LAN burst to wake its network "
+            "connection...")
+        from .wol import wake_burst
+        ip = cfg.device.ip
+        wake_burst(cfg.device.mac, ip.rpartition(":")[0] if ":" in ip else ip)
+    except Exception as exc:  # noqa: BLE001 - best effort
+        log(f"  (Could not send Wake-on-LAN: {exc})")
+        return False
+    return True
+
+
 def connect_tv(cfg: Config, *, on_prompt: Optional[Callable[[], None]] = None,
                prompt_timeout: float = 60.0, timeout: float = 10.0,
                recover: bool = True, discover_timeout: float = 3.0,
@@ -45,6 +73,13 @@ def connect_tv(cfg: Config, *, on_prompt: Optional[Callable[[], None]] = None,
     except Exception as exc:  # noqa: BLE001 - network errors are expected
         if not recover:
             raise
+        # A person asked (allow_guess): if the TV is lit but deaf, wake its
+        # network and try again before going looking for it.
+        if allow_guess and wake_lit_tv(cfg, out):
+            try:
+                return _open()
+            except Exception:  # noqa: BLE001 - fall through to relocating
+                pass
         from .discovery import locate_tv
         out("Saved TV address didn't answer; looking for the TV again...")
         new_ip = locate_tv(cfg.device.mac, timeout=discover_timeout, log=out,

@@ -21,7 +21,7 @@ from lgtv_easy import discovery, netdiag
 from lgtv_easy.mock_tv import MockTV
 
 OURS = "B8:16:5F:72:64:C6"          # the MAC that is stored and no longer exists
-THEIRS = "64:CB:E9:70:CF:A4"        # the one the TV actually has now
+THEIRS = "64:CB:E9:70:CF:A4"        # a different LG TV (in fact the other set in the house)
 
 
 # ----- telling an LG TV from a Node server -----------------------------------
@@ -74,23 +74,26 @@ def test_probing_never_registers_with_the_tv():
 
 
 # ----- the fall-through ------------------------------------------------------
-def test_a_stale_mac_no_longer_ends_the_search(monkeypatch):
-    """The bug itself: locate_tv returned None the moment the stored MAC missed,
-    never trying the sweep that had the answer."""
+def test_a_stale_mac_no_longer_ends_the_search_for_a_person(monkeypatch):
+    """locate_tv used to return None the moment the stored MAC missed, never
+    trying the sweep that had the answer. 'Test my TV' still tries it."""
     monkeypatch.setattr(discovery, "locate_by_mac", lambda *a, **k: None)
     monkeypatch.setattr(netdiag, "lg_tv_hosts",
                         lambda *a, **k: [("192.168.86.51", THEIRS)])
-    assert discovery.locate_tv(OURS, allow_guess=False) == "192.168.86.51"
+    assert discovery.locate_tv(OURS) == "192.168.86.51"
 
 
-def test_the_fall_through_works_for_the_unattended_watcher(monkeypatch):
-    """allow_guess=False is the daemon's setting. If the fix only worked with
-    a person present it would not have fixed this outage at all."""
+def test_the_unattended_watcher_does_not_fall_through(monkeypatch):
+    """In a house with two LG sets, "our MAC is missing" usually means our TV is
+    off or asleep, and the LG TV still answering is the other one: the watcher
+    adopted it on 2026-09-30, and every attempt knocked on its door. So it does
+    not even look."""
     monkeypatch.setattr(discovery, "locate_by_mac", lambda *a, **k: None)
-    monkeypatch.setattr(netdiag, "lg_tv_hosts",
-                        lambda *a, **k: [("10.0.0.5", THEIRS)])
-    for allow_guess in (True, False):
-        assert discovery.locate_tv(OURS, allow_guess=allow_guess) == "10.0.0.5"
+    monkeypatch.setattr(netdiag, "lg_tv_hosts", lambda *a, **k: pytest.fail(
+        "swept for another LG TV with nobody there to ask"))
+    said = []
+    assert discovery.locate_tv(OURS, allow_guess=False, log=said.append) is None
+    assert "test my tv" in " ".join(said).lower()
 
 
 def test_two_tvs_are_never_guessed_between(monkeypatch):
@@ -100,13 +103,13 @@ def test_two_tvs_are_never_guessed_between(monkeypatch):
     monkeypatch.setattr(netdiag, "lg_tv_hosts",
                         lambda *a, **k: [("10.0.0.5", THEIRS),
                                          ("10.0.0.6", "00:1C:62:00:00:01")])
-    assert discovery.locate_tv(OURS, allow_guess=False) is None
+    assert discovery.locate_tv(OURS) is None      # not even for a person
 
 
 def test_no_lg_tv_at_all_still_gives_up(monkeypatch):
     monkeypatch.setattr(discovery, "locate_by_mac", lambda *a, **k: None)
     monkeypatch.setattr(netdiag, "lg_tv_hosts", lambda *a, **k: [])
-    assert discovery.locate_tv(OURS, allow_guess=False) is None
+    assert discovery.locate_tv(OURS) is None
 
 
 def test_a_mac_that_still_matches_takes_the_fast_path(monkeypatch):

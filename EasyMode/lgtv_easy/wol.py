@@ -92,3 +92,15 @@ def send_wol(mac: str, broadcast="255.255.255.255",
                         continue
             if interval and i + 1 < rounds:
                 time.sleep(interval)
+
+
+def wake_burst(mac: str, ip: str = "") -> None:
+    """The sustained burst (~5 s) that a sleeping Wi-Fi TV actually receives.
+
+    Two uses: bringing the TV back from full standby, and reviving a TV that is
+    switched on but has stopped answering on the network - it still answers ARP,
+    drops every IP packet, and comes back the instant one of these lands. The
+    packet is addressed to the MAC, so it reaches the TV even if DHCP has moved
+    it away from ``ip``.
+    """
+    send_wol(mac, broadcast=wake_targets(ip), repeat=20, interval=0.25)
