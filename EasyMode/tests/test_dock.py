@@ -262,6 +262,22 @@ def test_a_healthy_entry_is_left_exactly_as_it_is():
     assert "Installed by the installer" in entry.read_text(encoding="utf-8")
 
 
+def test_a_stale_window_class_is_corrected_and_nothing_else_is_touched():
+    """Entries written before the class was fixed name one Tk never reported, so
+    the shell could not tie the running window to the pinned icon. Only that
+    line is ours to correct - the rest is the installer's."""
+    entry = dock._data_home() / "applications" / dock.DESKTOP_FILE
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text("[Desktop Entry]\nType=Application\nName=Installed by the "
+                     "installer\nExec=/usr/bin/true\n"
+                     "StartupWMClass=LGTVCompanionEasyMode\n", encoding="utf-8")
+    dock.ensure_entry()
+    text = entry.read_text(encoding="utf-8")
+    assert f"StartupWMClass={branding.WM_CLASS}\n" in text
+    assert "LGTVCompanionEasyMode" not in text
+    assert "Installed by the installer" in text and "Exec=/usr/bin/true\n" in text
+
+
 def test_the_icon_is_named_not_pathed_once_the_theme_has_it():
     """An absolute path into wherever this copy happens to be running from is an
     icon that breaks the day that folder moves."""

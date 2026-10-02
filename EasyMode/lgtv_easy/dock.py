@@ -354,6 +354,33 @@ def _entry_is_broken(path: Path) -> bool:
     return False
 
 
+def _correct_wm_class(path: Path) -> None:
+    """Point a stale StartupWMClass at the class the window really reports.
+
+    Every entry we wrote before branding.WM_CLASS was corrected names
+    "LGTVCompanionEasyMode", a class Tk never reported, so the shell could not
+    tie the running window to the pinned icon and gave it a generic one of its
+    own. Only that line changes - the rest of the file is the installer's - and
+    an entry with no StartupWMClass at all is left alone.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        return
+    changed = False
+    for i, line in enumerate(lines):
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == "StartupWMClass" \
+                and value.strip() != branding.WM_CLASS:
+            lines[i] = f"StartupWMClass={branding.WM_CLASS}\n"
+            changed = True
+    if changed:
+        try:
+            path.write_text("".join(lines), encoding="utf-8")
+        except OSError:
+            pass  # a system-wide entry we may not write; the shell still matches by file name
+
+
 def ensure_entry() -> "Path | None":
     """The menu entry to pin, writing one first if nothing installed it.
 
@@ -362,6 +389,7 @@ def ensure_entry() -> "Path | None":
     """
     existing = installed_entry()
     if existing and not _entry_is_broken(existing):
+        _correct_wm_class(existing)
         return existing
     if existing:
         # Ours to fix: an installer we shipped wrote an entry the spec rejects.

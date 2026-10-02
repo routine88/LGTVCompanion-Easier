@@ -121,11 +121,15 @@ on the Desktop, and the app's id on the dock (`--no-dock-icon` to skip).
 `python3-tk` and friends are installed through whichever of apt/dnf/pacman/zypper
 is present (`--no-deps` to skip).
 
-The line that matters for the dock is `StartupWMClass=LGTVCompanionEasyMode`: it
+The line that matters for the dock is `StartupWMClass=Lgtv-companion-easy`: it
 ties the running window to the menu entry, which is how the taskbar button gets
 the app's icon and name. Tk reports that class because `gui.App` passes
-`className=branding.WM_CLASS`, and the name is spelled so that Tk capitalising
-its first letter cannot change it.
+`className=branding.WM_CLASS`, and the name is spelled so that Tk's title-casing
+(first letter up, every other letter down) cannot change it. Lower-cased it is
+also the entry's file name, which the shell falls back to when StartupWMClass
+does not match. Entries written before this carry the old
+`LGTVCompanionEasyMode`, which Tk never reported; the app corrects that line in
+place at its next launch.
 
 `~/.local/lib/...` is deliberately not `~/.local/share/lgtv-companion-easy` —
 the portable `Linux Launch.sh` keeps its git clone there, and the two must not

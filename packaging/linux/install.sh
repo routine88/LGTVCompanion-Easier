@@ -25,8 +25,9 @@ set -eu
 APP_NAME="LGTV Companion Easy Mode"
 APP_ID="lgtv-companion-easy"
 # Must match lgtv_easy.branding.WM_CLASS, or the dock shows a generic icon for
-# the running window instead of ours.
-WM_CLASS="LGTVCompanionEasyMode"
+# the running window instead of ours. It is the class Tk actually reports, which
+# is title-cased, not the CamelCase it once was - see branding.py.
+WM_CLASS="Lgtv-companion-easy"
 CLI_NAME="lgtv-easy"
 
 SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

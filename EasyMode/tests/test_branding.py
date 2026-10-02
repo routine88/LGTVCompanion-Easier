@@ -104,12 +104,36 @@ def test_the_app_id_is_stable():
     assert branding.APP_ID == "LGTVCompanion.EasyMode"
 
 
-def test_the_wm_class_survives_tks_capitalisation():
-    """Tk builds disagree about capitalising the class half of WM_CLASS, so the
-    name must be unchanged by it - otherwise it stops matching StartupWMClass in
-    the .desktop file and the dock shows a placeholder icon."""
+def test_the_wm_class_survives_tks_title_casing():
+    """Tk title-cases the className it is given - first letter up, every other
+    letter DOWN - so the name has to be one that leaves unchanged. The first
+    version only survived upper-casing the first letter: "LGTVCompanionEasyMode"
+    went out as "Lgtvcompanioneasymode", matched no StartupWMClass, and the dock
+    gave the running window a generic gear beside the pinned icon."""
     name = branding.WM_CLASS
-    assert name[:1].upper() + name[1:] == name
+    assert name[:1].upper() + name[1:].lower() == name
+
+
+def test_the_wm_class_lower_cases_to_the_desktop_file_id():
+    """When StartupWMClass does not match, GNOME looks for a .desktop file named
+    after the lower-cased class - so an entry whose StartupWMClass is stale or
+    missing still claims the window."""
+    from lgtv_easy import dock
+    assert branding.WM_CLASS.lower() == dock.DESKTOP_ID
+
+
+def test_tk_reports_the_wm_class_unchanged():
+    """The real check, against whichever Tk this is: the class half of WM_CLASS
+    is the main window's Tk class."""
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk(className=branding.WM_CLASS)
+    except tk.TclError as exc:
+        pytest.skip(f"no display: {exc}")
+    try:
+        assert root.winfo_class() == branding.WM_CLASS
+    finally:
+        root.destroy()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows-only shell call")

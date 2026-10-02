@@ -29,13 +29,17 @@ from pathlib import Path
 # If you change it, change it there too.
 APP_ID = "LGTVCompanion.EasyMode"
 
-# The X11/Wayland WM_CLASS. Deliberately spelled so that capitalising the first
-# letter leaves it unchanged: Tk derives the class half of WM_CLASS from the
-# className we pass it, and different Tk builds disagree about whether they
-# capitalise it. A name that is already "capitalised" is identical either way,
-# which keeps it matching StartupWMClass in the .desktop file - the hook GNOME
-# and KDE use to show our icon on the dock button instead of a grey question mark.
-WM_CLASS = "LGTVCompanionEasyMode"
+# The X11/Wayland WM_CLASS, and StartupWMClass in the .desktop file - the hook
+# GNOME and KDE use to light up the pinned dock icon for our window instead of
+# filing it under a second, generic one. Tk does not report the className we
+# pass verbatim: it title-cases it, upper-casing the first letter and LOWER-casing
+# every other one (Tk 8.6 and 9.0 alike), so "LGTVCompanionEasyMode" went out as
+# "Lgtvcompanioneasymode", matched nothing, and the dock showed a grey gear. The
+# instance half is no anchor either: Tk appends " #2" to it while a second Easy
+# Mode window is open. So the name is one title-casing cannot change, and which
+# lower-cases to the desktop-file id, because that is the shell's fallback match
+# for an entry whose StartupWMClass is missing or stale.
+WM_CLASS = "Lgtv-companion-easy"
 
 # Executable names produced by the Windows build (packaging/windows/app.spec).
 GUI_EXE = "LGTV Companion Easy Mode.exe"   # windowed: no console flashes
