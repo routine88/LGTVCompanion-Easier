@@ -183,11 +183,12 @@ def test_an_unreadable_verdict_file_is_just_no_news(tmp_path, monkeypatch):
 
 
 # ----- "probably switched off" is a claim, and it needs evidence -------------
-def test_a_tv_on_this_pcs_own_cable_is_never_reported_as_switched_off(monkeypatch):
-    """The misdiagnosis this whole feature exists to stop. The app told a user
-    their TV was probably off while that TV was driving the desktop they were
-    reading it on - and "wait, it will come back" is the opposite of the advice
-    they needed."""
+def test_a_tv_that_said_it_was_on_is_never_reported_as_switched_off(monkeypatch):
+    """The misdiagnosis this verdict exists to stop: telling a user their TV is
+    probably off while it is on - "wait, it will come back" is the opposite of
+    the advice they need. Whether it was on comes from the TV's own last
+    power-state answer; the HDMI cable turned out to say "on" for a TV that was
+    switched off (tested 2026-10-02), so it is no longer asked."""
     from lgtv_easy import display, netdiag
     from lgtv_easy.config import Config, Device
 
@@ -198,13 +199,13 @@ def test_a_tv_on_this_pcs_own_cable_is_never_reported_as_switched_off(monkeypatc
     monkeypatch.setattr(netdiag, "local_ipv4s", lambda: ["192.168.86.21"])
     failed = selfheal.RepairResult(ok=False, error="timed out")
 
-    monkeypatch.setattr(display, "tv_is_physically_on", lambda: True)
-    assert selfheal._classify(cfg, failed) == selfheal.VERDICT_TV_NOT_ON_NETWORK
+    assert selfheal._classify(cfg, failed, True) == selfheal.VERDICT_TV_NOT_ON_NETWORK
 
-    # ...and with no display attached there is no evidence, so the old, calm
-    # answer is still the right one.
-    monkeypatch.setattr(display, "tv_is_physically_on", lambda: False)
-    assert selfheal._classify(cfg, failed) == selfheal.VERDICT_TV_OFF
+    # ...and when the TV said it was going off, or said nothing, the calm
+    # answer is the right one - whatever the cable claims.
+    monkeypatch.setattr(display, "tv_is_physically_on", lambda: True)
+    assert selfheal._classify(cfg, failed, False) == selfheal.VERDICT_TV_OFF
+    assert selfheal._classify(cfg, failed, None) == selfheal.VERDICT_TV_OFF
 
 
 def test_a_tv_that_is_on_but_unreachable_asks_for_help(monkeypatch):

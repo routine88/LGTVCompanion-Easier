@@ -14,25 +14,22 @@ from .config import Config
 from .webos import WebOSClient, pair_with_fallback
 
 
-def wake_lit_tv(cfg: Config, log: Callable[[str], None]) -> bool:
-    """Wake the network of a TV that is lit on this PC's cable but silent.
+def wake_tv_network(cfg: Config, log: Callable[[str], None]) -> bool:
+    """Send a Wake-on-LAN burst to a TV that is not answering.
 
-    The TV can be on and showing this PC while dropping every packet sent to it;
-    a sustained Wake-on-LAN burst brings its network back at once. For callers
-    with a person at the PC who asked for the TV - a burst to a set that is
-    really in standby switches it on, which is what they asked for. (The watcher
-    has its own, stricter version: Daemon._maybe_wake_network.) Returns True
-    when a burst went out. Never raises.
+    A TV can go silent on the network while it is on, and a sustained burst
+    brings its network back at once; to a set in standby, the same burst
+    switches it on. Only for callers where a person asked for the TV - 'Test my
+    TV', a repair, `lgtv-easy off` - for whom either outcome is the point. (The
+    watcher sends one only on the TV's own word that it was on: see
+    Daemon._maybe_wake_network.) Returns True when a burst went out. Never
+    raises.
     """
     if not cfg.device.mac:
         return False
     try:
-        from . import display
-        if not display.panel_is_lit(cfg.device.panel):
-            return False
-        log("Your TV is lit on this PC's display cable but isn't answering on "
-            "the network - sending it a Wake-on-LAN burst to wake its network "
-            "connection...")
+        log("The TV isn't answering - sending it a Wake-on-LAN burst (this wakes "
+            "its network connection, or switches it on if it's in standby)...")
         from .wol import wake_burst
         ip = cfg.device.ip
         wake_burst(cfg.device.mac, ip.rpartition(":")[0] if ":" in ip else ip)
@@ -73,9 +70,9 @@ def connect_tv(cfg: Config, *, on_prompt: Optional[Callable[[], None]] = None,
     except Exception as exc:  # noqa: BLE001 - network errors are expected
         if not recover:
             raise
-        # A person asked (allow_guess): if the TV is lit but deaf, wake its
-        # network and try again before going looking for it.
-        if allow_guess and wake_lit_tv(cfg, out):
+        # A person asked (allow_guess): wake the TV and try again before going
+        # looking for it.
+        if allow_guess and wake_tv_network(cfg, out):
             try:
                 return _open()
             except Exception:  # noqa: BLE001 - fall through to relocating

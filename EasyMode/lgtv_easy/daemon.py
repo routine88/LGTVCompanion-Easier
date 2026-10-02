@@ -55,14 +55,30 @@ DIAGNOSE_AFTER_SECONDS = 120.0
 # the answer rarely changes and each check sweeps the LAN.
 DIAGNOSE_REPEAT_SECONDS = 1800.0
 
-# A TV can be switched on - lit, showing this PC - and still drop every packet
-# sent to it: it answers ARP, ignores everything else, and comes back the instant
-# a sustained Wake-on-LAN burst lands (seen 2026-10-02; the outage of 09-30 was
-# five hours of this). So once the TV has been silent this long, and only while
-# the cable shows our TV lit and someone is at the keyboard, send it one. Short
-# of the self-check, so the check sees the result rather than the problem.
+# A TV can go silent on the network while it is on: it answers ARP, drops
+# everything else, and comes back the instant a sustained Wake-on-LAN burst
+# lands. The logs show it happening around the idle timeout - the screen-off
+# fails and the panel stays lit until somebody comes back. But a burst to a TV
+# that is really off switches it on, and neither the HDMI cable nor the network
+# can tell those apart (tested 2026-10-02: switched off, the set kept its
+# connector "connected" and answered on its control port throughout).
+#
+# What does tell them apart is the TV's own report. Switched off with the
+# remote, it says "Request Power Off Logo", then "Active Standby", and keeps
+# answering for at least a minute. So ask for its power state every
+# POWER_SAMPLE_SECONDS, and send a burst only if the last answer before the
+# silence - no older than POWER_FRESH_SECONDS - said it was on.
+POWER_SAMPLE_SECONDS = 10.0
+POWER_FRESH_SECONDS = 30.0
+# Power states in which the set is on: lit, or blanked by us ("Screen Off").
+ON_POWER_STATES = frozenset({"Active", "Screen Off"})
+# Silence this long before a burst (short of the self-check, so the check sees
+# the result rather than the problem), then at most this often and this many
+# times per outage: a set unplugged at the wall must not get one every five
+# minutes for a week.
 NETWORK_WAKE_AFTER_SECONDS = 60.0
 NETWORK_WAKE_REPEAT_SECONDS = 300.0
+NETWORK_WAKE_MAX_PER_OUTAGE = 3
 
 # How long to keep trying to wake a fully-powered-off TV (with Wake-on-LAN) on
 # user activity before concluding WoL can't reach it on this network - e.g. a
@@ -114,7 +130,6 @@ class Daemon:
         sleep_watcher_factory: Optional[Callable[..., object]] = None,
         locator_fn: Optional[Callable[[str], Optional[str]]] = None,
         wol_fn: Optional[Callable[[bool], None]] = None,
-        panel_on_fn: Optional[Callable[[], bool]] = None,
         logger=None,
     ):
         self.config = config
@@ -129,9 +144,6 @@ class Daemon:
         # real packets (or sleep through a sustained burst). Takes one arg: True
         # when waking from full standby (sustained burst), False for screen-off.
         self._wol_fn = wol_fn or self._default_wol
-        # "Is our TV lit on this PC's display cable?" Injectable so tests never
-        # read the real sysfs.
-        self._panel_on_fn = panel_on_fn or self._default_panel_on
         # The default poll-sleep waits on an event so a settings change can cut
         # it short and apply at once (see _interruptible_sleep). Tests inject a
         # deterministic sleep_fn and bypass this.
@@ -178,9 +190,15 @@ class Daemon:
         # written to disk until the TV at that address accepts our pairing key -
         # see _relocate. None when there is no unconfirmed move in flight.
         self._unconfirmed_from: Optional[str] = None
+        # What the TV last said about its power, and when (see
+        # POWER_SAMPLE_SECONDS). ("", "") until it has been asked.
+        self._tv_power = ("", "")        # (state, processing)
+        self._tv_power_at = 0.0
+        self._next_power_sample_at = 0.0
         # Network-wake state (see NETWORK_WAKE_AFTER_SECONDS).
         self._next_network_wake_at = 0.0
-        self.network_wakes = 0           # bursts sent to a lit, silent TV
+        self._outage_wakes = 0           # bursts sent in the current outage
+        self.network_wakes = 0           # bursts sent, ever (observable)
         # Deep-off recovery: track how long we've been failing to wake the TV
         # from full standby so we can give up (and disable deep-off) rather than
         # strand it forever if WoL can't reach it. None = not currently failing.
@@ -280,23 +298,61 @@ class Daemon:
             self._client = None
             return None
 
-    def _default_panel_on(self) -> bool:
-        """True when the TV on this PC's display cable is lit - and, once setup
-        has recorded which panel that is, only if it is that one."""
-        from . import display
-        return display.panel_is_lit(self.config.device.panel)
+    def _sample_power(self) -> None:
+        """Ask the TV for its power state, every POWER_SAMPLE_SECONDS.
+
+        One small request; the answer is what lets _maybe_wake_network tell a
+        set that went silent while on from one somebody switched off. A failed
+        request drops the client: a TV that has stopped answering must start
+        the outage clock now, not whenever the next action happens to notice.
+        """
+        now = self._clock()
+        if now < self._next_power_sample_at:
+            return
+        self._next_power_sample_at = now + max(self.config.poll_seconds,
+                                               POWER_SAMPLE_SECONDS)
+        with self._action_lock:
+            client = self._ensure_client()
+            if not client:
+                return
+            try:
+                payload = (client.get_power_state() or {}).get("payload") or {}
+            except Exception as exc:  # noqa: BLE001 - a dead socket, usually
+                self.logger.debug("Could not read the TV's power state: %s", exc)
+                self._drop_client()
+                return
+        self._note_power(payload)
+
+    def _note_power(self, payload: dict) -> None:
+        state = str(payload.get("state") or "")
+        if state:
+            self._tv_power = (state, str(payload.get("processing") or ""))
+            self._tv_power_at = self._clock()
+
+    def _was_on_when_silenced(self) -> Optional[bool]:
+        """What the TV last said about its power before the current silence.
+
+        True: it said it was on. False: it said it was off or on its way
+        there. None: no answer recent enough to go on - including no outage.
+        """
+        if self._failing_since is None or not self._tv_power[0]:
+            return None
+        if self._failing_since - self._tv_power_at > POWER_FRESH_SECONDS:
+            return None
+        state, processing = self._tv_power
+        going = processing.lower()
+        if any(word in going for word in ("power off", "suspend", "standby")):
+            return False
+        return state in ON_POWER_STATES
 
     def _maybe_wake_network(self) -> bool:
-        """Send a Wake-on-LAN burst to a TV that is lit but not answering.
+        """Send a Wake-on-LAN burst to a TV that went silent while it was on.
 
-        Every condition is there because a burst to a TV that is really off
-        switches it on. The display cable is the evidence that it is on, but
-        some sets keep the connector live in standby, so it is not enough alone:
-        someone must also be at the keyboard - the case in which the watcher
-        already turns the TV on - and the silence must have outlasted the
-        moment of somebody pressing the remote's power button mid-session.
-        Never after our own deep power-off; waking from that is wake_screen's
-        job. Returns True when a burst went out, so the caller retries.
+        Only on the TV's own word (see POWER_SAMPLE_SECONDS): a burst to a set
+        that is really off switches it on, and nothing else available can tell
+        the two apart. Not after our own deep power-off either - waking from
+        that is wake_screen's decision. Returns True when a burst went out, so
+        the caller retries.
         """
         mac = self.config.device.mac
         if not mac or self.screen_state == STATE_STANDBY:
@@ -304,21 +360,18 @@ class Daemon:
         now = self._clock()
         if (self._failing_since is None
                 or now - self._failing_since < NETWORK_WAKE_AFTER_SECONDS
-                or now < self._next_network_wake_at):
+                or now < self._next_network_wake_at
+                or self._outage_wakes >= NETWORK_WAKE_MAX_PER_OUTAGE):
             return False
-        try:
-            if self._idle_fn() >= INPUT_ACTIVE_SECONDS:
-                return False
-            if not self._panel_on_fn():
-                return False
-        except Exception:  # noqa: BLE001 - no evidence, no burst
+        if self._was_on_when_silenced() is not True:
             return False
         self._next_network_wake_at = now + NETWORK_WAKE_REPEAT_SECONDS
+        self._outage_wakes += 1
         self.logger.info(
-            "The TV is lit on this PC's display cable and you're at the PC, but "
-            "it hasn't answered on the network for %.0f minute(s) - sending a "
-            "Wake-on-LAN burst to wake its network connection.",
-            max(1.0, (now - self._failing_since) / 60.0))
+            "The TV was on when it stopped answering %.0f minute(s) ago (it last "
+            "reported '%s') - sending a Wake-on-LAN burst to wake its network "
+            "connection.", max(1.0, (now - self._failing_since) / 60.0),
+            self._tv_power[0])
         try:
             self._wol_fn(True)
         except Exception as exc:  # noqa: BLE001
@@ -508,6 +561,8 @@ class Daemon:
             return
         self._failing_since = None
         self._next_diagnosis_at = 0.0
+        self._outage_wakes = 0
+        self._next_network_wake_at = 0.0
         if self.last_diagnosis is not None:
             self.logger.info("The TV is reachable again.")
             self.last_diagnosis = None
@@ -544,7 +599,7 @@ class Daemon:
                 "No contact with the TV for %.0f minutes - running a self-check "
                 "to find out why.", minutes)
             diagnosis = selfheal.diagnose(
-                self.config,
+                self.config, was_on=self._was_on_when_silenced(),
                 log=lambda msg: self.logger.debug("self-check: %s", msg))
             self.last_diagnosis = diagnosis
             selfheal.save_diagnosis(diagnosis)
@@ -1200,6 +1255,7 @@ class Daemon:
         # in standby: the TV is off the network there, and asking would only
         # trip the "can't connect" warning.
         if self.screen_state != STATE_STANDBY:
+            self._sample_power()
             self._sample_input(
                 active=raw_idle < min(threshold, INPUT_ACTIVE_SECONDS))
         # ...but every decision below runs on time-on-screen, which is what the

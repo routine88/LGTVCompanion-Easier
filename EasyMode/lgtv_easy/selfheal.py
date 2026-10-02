@@ -271,16 +271,16 @@ def _repair_impl(cfg, res, saved, out, *, persist, connect, blink, on_prompt,
             res.summary = f"Your TV is responding at {res.new_ip}. ✓"
             return res
 
-    # ----- step 2b: lit but deaf? wake its network -----------------------
+    # ----- step 2b: silent? wake it ---------------------------------------
     # Only for a person who asked; the watcher does its own, stricter version
     # (Daemon._maybe_wake_network). Not when the ports answered: then the
     # network is awake and the problem is something else.
     if allow_guess and not saved_reachable:
-        from .recovery import wake_lit_tv
-        if wake_lit_tv(cfg, out) and saved and try_connect(
+        from .recovery import wake_tv_network
+        if wake_tv_network(cfg, out) and saved and try_connect(
                 cfg.device.ip, "Reconnecting to the saved address"):
-            res.summary = (f"Your TV's network connection had gone to sleep. "
-                           f"Woke it up, and it's responding at {res.new_ip}. ✓")
+            res.summary = (f"Woke your TV with Wake-on-LAN, and it's responding "
+                           f"at {res.new_ip}. ✓")
             return res
 
     # ----- step 3-4: the saved address is dead - find the TV again --------
@@ -348,16 +348,14 @@ VERDICT_TV_OFF = "tv-off"                # nothing answers and nothing is wrong 
 VERDICT_PAIRING = "pairing"              # the TV answers but refuses us
 VERDICT_NO_NETWORK = "no-network"        # this PC is not on any network
 VERDICT_WRONG_NETWORK = "wrong-network"  # PC and TV are on different subnets
-# Powered, on this PC's own display cable, and still not answering: the TV is
-# on some other network. Distinguished from VERDICT_TV_OFF because the advice is
-# the opposite - "wait, it will come back" is wrong, and waiting is what the app
-# did for two days while the user watched it do nothing.
+# The TV said it was on when it went silent, and its MAC has left this network:
+# if it is still on, it is on some other network. Distinguished from
+# VERDICT_TV_OFF because the advice is the opposite - "wait, it will come back"
+# is wrong.
 VERDICT_TV_NOT_ON_NETWORK = "tv-not-on-network"
-# Lit on the cable, and its MAC *is* on this network, yet nothing answers: the
-# TV's network connection has gone to sleep while the TV stayed on. Seen
-# 2026-10-02 - mistaken for a TV on another Wi-Fi, which sent the advice off in
-# the wrong direction. A Wake-on-LAN burst revives it; the watcher sends one
-# while someone is at the PC.
+# The TV said it was on when it went silent, and its MAC still answers ARP
+# here: its network connection has gone to sleep while the set stayed on. The
+# watcher sends it Wake-on-LAN bursts; past those, it takes the remote.
 VERDICT_TV_NETWORK_ASLEEP = "tv-network-asleep"
 
 # The verdicts that will not improve on their own, however long we wait.
@@ -403,7 +401,8 @@ class Diagnosis:
                    at=float(data.get("at") or 0.0))
 
 
-def _classify(cfg: Config, res: RepairResult) -> str:
+def _classify(cfg: Config, res: RepairResult,
+              was_on: Optional[bool] = None) -> str:
     """Turn a repair outcome into one of the verdicts above.
 
     Order matters: the checks run from "definitely not the TV's fault" outwards,
@@ -422,61 +421,52 @@ def _classify(cfg: Config, res: RepairResult) -> str:
         note = netdiag.same_subnet_guess(pc_ips, saved)
         if note and "WARNING" in note:
             return VERDICT_WRONG_NETWORK
-    # Before concluding "switched off", ask the one source that actually knows.
-    # A TV driving this PC's desktop over HDMI is not off, whatever the network
-    # thinks, and telling its owner to go and switch it on is how you lose their
-    # trust in everything else the app says.
-    try:
-        from . import display
-        if display.tv_is_physically_on():
-            # Our MAC still answering ARP means it is on this network after all.
-            if cfg.device.mac and netdiag.ip_for_mac(cfg.device.mac):
-                return VERDICT_TV_NETWORK_ASLEEP
-            return VERDICT_TV_NOT_ON_NETWORK
-    except Exception:  # noqa: BLE001 - no display, no opinion
-        pass
+    # Whether the TV is on comes from the TV: the watcher's last power-state
+    # answer before the silence (``was_on``). Not from the HDMI cable - this
+    # set keeps its connector "connected" while switched off (tested
+    # 2026-10-02), so the cable said "on" for every TV that was simply off and
+    # every overnight standby became an alarm. Without the TV's word, the calm
+    # verdict: an unreachable TV that may be off is the normal case.
+    if was_on:
+        if cfg.device.mac and netdiag.ip_for_mac(cfg.device.mac):
+            return VERDICT_TV_NETWORK_ASLEEP
+        return VERDICT_TV_NOT_ON_NETWORK
     return VERDICT_TV_OFF
 
 
 def diagnose(cfg: Config, *, log: Optional[Callable[[str], None]] = None,
              discover_timeout: float = 3.0,
-             connect_timeout: float = 6.0) -> Diagnosis:
+             connect_timeout: float = 6.0,
+             was_on: Optional[bool] = None) -> Diagnosis:
     """Work out why the TV is unreachable, fix what can be fixed, and say which.
 
     Runs :func:`repair` in its unattended mode - ``allow_guess=False`` so an
     unidentified TV is never contacted (adopting the wrong one puts a pairing
     prompt on a stranger's screen), no blink, no client handed back - and then
-    classifies the outcome. Never raises.
+    classifies the outcome. ``was_on`` is what the TV last said about its power
+    before going silent (True on, False off, None unknown); see _classify.
+    Never raises.
     """
     res = repair(cfg, log=log, persist=True, connect=False, blink=False,
                  on_prompt=None, allow_guess=False,
                  discover_timeout=discover_timeout,
                  connect_timeout=connect_timeout)
-    verdict = _classify(cfg, res)
+    verdict = _classify(cfg, res, was_on)
     summary = res.summary or ("The TV is reachable." if res.ok else
                               "Could not reach the TV.")
-    seen = ""
-    if verdict in (VERDICT_TV_NOT_ON_NETWORK, VERDICT_TV_NETWORK_ASLEEP):
-        try:
-            from . import display
-            panel = display.lg_panel()
-            seen = f" ({panel.describe()})" if panel else ""
-        except Exception:  # noqa: BLE001
-            pass
     if verdict == VERDICT_TV_NETWORK_ASLEEP:
         summary = (
-            f"Your TV is switched on - this PC can see it on its display "
-            f"cable{seen} - and it is on this network, but it has stopped "
-            "answering: its network connection seems to have gone to sleep. "
-            "Easy Mode sends it a wake-up signal while you're using this PC. If "
-            "it stays unreachable, switch the TV off and on with the remote.")
+            "Your TV was on when it stopped answering, and it is still on this "
+            "network: its network connection seems to have gone to sleep. Easy "
+            "Mode has sent it a few wake-up signals. If it stays unreachable, "
+            "switch the TV off and on with the remote.")
     if verdict == VERDICT_TV_NOT_ON_NETWORK:
         summary = (
-            f"Your TV is switched on - this PC can see it on its display "
-            f"cable{seen} - but nothing on the network answers it. Its Wi-Fi is "
-            "almost certainly joined to a different network from this computer: "
-            "a guest network, or a second SSID on the same router. On the TV, "
-            "open Settings > Network and put it on the same Wi-Fi this PC uses.")
+            "Your TV was on when it stopped answering, and it is no longer on "
+            "this network. If it is still on, its Wi-Fi has probably joined a "
+            "different network from this computer - a guest network, or a "
+            "second SSID on the same router. On the TV, open Settings > Network "
+            "and put it on the same Wi-Fi this PC uses.")
     if verdict == VERDICT_TV_OFF and not res.ok:
         # The generic "couldn't find your TV" line is right, but the watcher is
         # allowed to be calmer about it than a person who just pressed a button:

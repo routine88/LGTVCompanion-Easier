@@ -289,25 +289,12 @@ def lg_panel() -> Optional[Panel]:
 
 
 def tv_is_physically_on() -> bool:
-    """True when an LG display is attached to this PC and awake.
+    """True when an LG display is attached to this PC and the PC is driving it.
 
-    The single fact that would have prevented this project's worst
-    misdiagnosis: it is evidence *from the TV itself*, not an inference drawn
-    from the network's silence.
+    Despite the name, NOT proof the TV is on: switched off with its remote, the
+    set this was written against kept its connector "connected", DPMS "On" and
+    its EDID readable (tested 2026-10-02). It says which TV is on this cable,
+    not whether that TV is awake - ask the TV for its power state for that.
     """
     panel = lg_panel()
     return bool(panel and panel.powered)
-
-
-def panel_is_lit(identity: str = "") -> bool:
-    """True when the LG panel on this PC's cable is lit - and, given the
-    identity setup pinned (``Device.panel``), only if it is that panel.
-
-    "Lit" is the connector's word for it, not the TV's: some sets keep the
-    connector live in standby. Callers that act on it - a Wake-on-LAN burst
-    switches a TV on - need a person at the PC as well.
-    """
-    panel = lg_panel()
-    if not panel or not panel.powered:
-        return False
-    return not identity or panel.identity == identity

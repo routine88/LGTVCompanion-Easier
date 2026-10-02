@@ -52,12 +52,11 @@ def _never_sweep_the_real_lan(monkeypatch):
     # the discovery fallback does next.
     monkeypatch.setattr(netdiag, "webos_hosts", lambda probe_timeout=0.6: [])
     monkeypatch.setattr(netdiag, "lg_tv_hosts", lambda probe_timeout=1.5: [])
-    # Nor may a test's outcome depend on whether the machine running it has an
-    # LG TV lit on its HDMI cable: when one is, every unreachable-TV path sends
-    # a Wake-on-LAN burst (recovery.wake_lit_tv). Tests that want a lit panel
-    # say so.
-    from lgtv_easy import display
-    monkeypatch.setattr(display, "panel_is_lit", lambda identity="": False)
+    # Nor a Wake-on-LAN burst: every attended unreachable-TV path sends one
+    # (recovery.wake_tv_network), and each takes ~5 s of sleeping between
+    # packets the fence below would refuse anyway. Tests that want it say so.
+    from lgtv_easy import wol
+    monkeypatch.setattr(wol, "wake_burst", lambda mac, ip="": None)
 
 # Point the config directory at a throwaway home for the whole run. Several code
 # paths persist what they learn (the TV's MAC, its address, which input this PC

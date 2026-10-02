@@ -327,9 +327,16 @@ def test_connect_tv_relocates_when_ip_moved(tmp_path, monkeypatch):
     monkeypatch.setattr(discovery, "locate_tv",
                         lambda mac, timeout=3.0, log=None, allow_guess=True: "127.0.0.1")
 
+    bursts = []
+    from lgtv_easy import wol
+    monkeypatch.setattr(wol, "wake_burst", lambda mac, ip="": bursts.append(mac))
+
     client = recovery.connect_tv(cfg)
     assert isinstance(client, _FakeClient) and client.ip == "127.0.0.1"
-    assert attempts == ["10.0.0.5", "127.0.0.1"]   # tried saved IP, then the new one
+    # Tried the saved IP, woke the TV and tried it again (a deaf TV that never
+    # moved answers there), then the address it had moved to.
+    assert bursts == ["B8:16:5F:72:64:C6"]
+    assert attempts == ["10.0.0.5", "10.0.0.5", "127.0.0.1"]
     assert cfg.device.ip == "127.0.0.1"
     assert Config.load().device.ip == "127.0.0.1"  # and persisted the correction
 
