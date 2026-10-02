@@ -224,3 +224,65 @@ def test_a_non_lg_mac_is_never_written_in_as_the_tvs(tmp_path, monkeypatch):
         assert daemon.wake_screen() is True
         assert netdiag.canon_mac(Config.load().device.mac) == \
             netdiag.canon_mac(OURS)
+
+
+def test_a_tv_that_only_registers_us_through_a_prompt_is_not_adopted(
+        tmp_path, monkeypatch):
+    """What actually happened (2026-09-30). The user's TV dropped off the
+    network; the only LG TV answering was the other set in the house, which put
+    up a pairing prompt; somebody in that room pressed Accept; and the watcher
+    took the registration as that TV knowing our key - saving its address and
+    writing its MAC over ours. Nothing afterwards could find the right TV again.
+    A TV that has to ask is not ours."""
+    monkeypatch.setenv("LGTV_EASY_HOME", str(tmp_path))
+    from lgtv_easy.config import Config, Device
+
+    # require_pairing + a different key: the mock prompts, then "accepts".
+    with MockTV(require_pairing=True, known_key="THEIR-OWN-KEY") as tv:
+        cfg = Config(idle_minutes=1.0)
+        cfg.device = Device(name="t", ip="10.0.0.5", mac=OURS, key="OUR-KEY")
+        cfg.save()
+        monkeypatch.setattr(netdiag, "mac_for_ip", lambda ip: THEIRS)
+        daemon = _daemon_against(tv, cfg, monkeypatch)
+
+        assert daemon._ensure_client(force=True) is None
+        assert tv.pair_prompts >= 1, "the mock never prompted - test is vacuous"
+        assert tv.requests == [], "sent commands to a TV that did not know us"
+    saved = Config.load().device
+    assert cfg.device.ip == "10.0.0.5" and saved.ip == "10.0.0.5"
+    assert netdiag.canon_mac(saved.mac) == netdiag.canon_mac(OURS)
+    assert saved.key == "OUR-KEY"
+
+
+def test_the_log_does_not_call_a_fallback_adoption_a_mac_match(tmp_path,
+                                                                monkeypatch):
+    """The log said "found it at .51 by MAC <ours>" for a TV whose MAC was not
+    ours, which made the wrong-TV adoption read as a routine DHCP move."""
+    import logging
+    monkeypatch.setenv("LGTV_EASY_HOME", str(tmp_path))
+    from lgtv_easy.config import Config, Device
+    from lgtv_easy.daemon import Daemon
+
+    lines = []
+
+    class Grab(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    log = _quiet()
+    log.setLevel(logging.INFO)
+    grab = Grab()
+    log.addHandler(grab)
+    try:
+        cfg = Config()
+        cfg.device = Device(name="t", ip="192.168.86.37", mac=OURS, key="k")
+        # The ARP table holds the address the locator returned, under another MAC.
+        monkeypatch.setattr(netdiag, "arp_table",
+                            lambda *a, **k: [("192.168.86.51", THEIRS)])
+        daemon = Daemon(cfg, locator_fn=lambda mac: "192.168.86.51", logger=log)
+        assert daemon._relocate(force=True) is True
+    finally:
+        log.removeHandler(grab)
+    moved = [m for m in lines if "192.168.86.51" in m]
+    assert moved and "by MAC" not in moved[0]
+    assert "matched nothing" in moved[0]

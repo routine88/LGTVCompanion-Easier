@@ -181,7 +181,8 @@ class PairingError(Exception):
 
 def pair_with_fallback(client: "WebOSClient", client_key: str = "",
                        on_prompt=None, prompt_timeout: float = 120.0,
-                       log=None, prefer_secure: bool = False) -> str:
+                       log=None, prefer_secure: bool = False,
+                       silent: bool = False) -> str:
     """Pair/connect, trying both plain ws (3000) and secure wss (3001).
 
     Older WebOS TVs accept the plain WebSocket on port 3000; many newer ones
@@ -190,6 +191,7 @@ def pair_with_fallback(client: "WebOSClient", client_key: str = "",
     ``prefer_secure=True`` to try 3001 first (once we know a TV wants it, this
     avoids a wasted attempt on every reconnect). The supplied ``client`` is
     reused (its ``secure`` flag is toggled), which keeps it testable with a mock.
+    ``silent`` is passed to :meth:`WebOSClient.connect`.
 
     Returns the client-key on success; raises the last error if both fail.
     """
@@ -203,7 +205,8 @@ def pair_with_fallback(client: "WebOSClient", client_key: str = "",
         out(f"Attempting {label}...")
         try:
             return client.connect(client_key=client_key, on_prompt=on_prompt,
-                                  prompt_timeout=prompt_timeout, log=out)
+                                  prompt_timeout=prompt_timeout, log=out,
+                                  silent=silent)
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             out(f"{label} did not work: {exc}")
@@ -249,12 +252,20 @@ class WebOSClient:
         return f"{scheme}://{self.ip}:{port}/"
 
     def connect(self, client_key: str = "", on_prompt=None,
-                prompt_timeout: float = 60.0, log=None) -> str:
+                prompt_timeout: float = 60.0, log=None,
+                silent: bool = False) -> str:
         """Open the socket and register. Returns the (possibly new) client key.
 
         If the TV has not paired before it shows an on-screen prompt; ``on_prompt``
         (if given) is called once so the UI can tell the user to press OK on the
         remote. Blocks up to ``prompt_timeout`` seconds waiting for acceptance.
+
+        ``silent=True`` is for callers with nobody in front of the TV: succeed
+        only if the TV already knows ``client_key``, and raise
+        :class:`PairingError` the moment it asks to pair instead of waiting for
+        an Accept. Whoever presses Accept on that prompt is not necessarily the
+        owner of the TV we meant - in a house with two LG sets, someone in the
+        other room did, and the app went on driving their TV instead.
 
         ``log`` (optional) receives stage-by-stage progress lines so the wizard
         can show beginners exactly where a connection got stuck.
@@ -276,6 +287,11 @@ class WebOSClient:
             mtype = msg.get("type")
             if mtype == "registered":
                 key = msg.get("payload", {}).get("client-key", client_key)
+                if silent and key and key != client_key:
+                    # Registered, but under a key it has just issued: this TV
+                    # did not know us.
+                    raise PairingError("the TV issued a new pairing key, so it "
+                                       "did not recognise ours")
                 self.client_key = key or client_key
                 self._ws.sock.settimeout(self.timeout)
                 out("TV accepted the registration. Paired.")
@@ -283,6 +299,9 @@ class WebOSClient:
             if mtype == "response" and msg.get("payload", {}).get(
                 "pairingType"
             ) == "PROMPT":
+                if silent:
+                    raise PairingError("the TV asked to pair, so it does not "
+                                       "recognise our pairing key")
                 if on_prompt and not prompted:
                     prompted = True
                     out(f"TV is showing a pairing prompt; waiting up to "

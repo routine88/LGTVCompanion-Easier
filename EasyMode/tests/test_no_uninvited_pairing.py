@@ -22,6 +22,8 @@ from lgtv_easy import discovery, netdiag, selfheal
 from lgtv_easy.config import Config, Device
 from lgtv_easy.daemon import Daemon
 from lgtv_easy.discovery import Discovered
+from lgtv_easy.mock_tv import MockTV
+from lgtv_easy.webos import PairingError, WebOSClient
 
 
 @pytest.fixture
@@ -148,3 +150,76 @@ def test_the_windows_startup_selftest_is_unattended(monkeypatch, tmp_path):
         assert captured.get("allow_guess") is False
     finally:
         app.on_close()
+
+
+# ----- and nothing unattended registers through a prompt -----------------
+# Refusing to *look for* an unidentified TV is not enough on its own. A TV can
+# turn up where ours was - a MAC-less fallback, or DHCP handing our old address
+# to the other set - and connecting to it puts the prompt up anyway. If anybody
+# in that room presses Accept, the registration succeeds. So a caller nobody is
+# watching must take only a TV that already knows the key.
+def test_silent_connect_succeeds_against_a_tv_that_knows_the_key():
+    with MockTV(require_pairing=True) as tv:
+        client = WebOSClient("127.0.0.1")
+        client._url = lambda: tv.url
+        try:
+            assert client.connect(client_key=tv.known_key, silent=True) == tv.known_key
+        finally:
+            client.close()
+        assert tv.pair_prompts == 0
+
+
+def test_silent_connect_refuses_instead_of_waiting_on_a_prompt():
+    with MockTV(require_pairing=True, known_key="THEIRS") as tv:
+        client = WebOSClient("127.0.0.1")
+        client._url = lambda: tv.url
+        with pytest.raises(PairingError):
+            client.connect(client_key="OURS", silent=True, prompt_timeout=30.0)
+        client.close()
+
+
+def test_silent_connect_refuses_a_tv_that_hands_out_a_new_key():
+    """No prompt, but a key we did not send: still not a TV that knew us."""
+    with MockTV(require_pairing=False, known_key="THEIRS") as tv:
+        client = WebOSClient("127.0.0.1")
+        client._url = lambda: tv.url
+        with pytest.raises(PairingError):
+            client.connect(client_key="OURS", silent=True)
+        client.close()
+
+
+def test_unattended_repair_does_not_adopt_a_tv_through_a_prompt(monkeypatch,
+                                                                tmp_path):
+    """selfheal.diagnose runs this with nobody watching, and a success persists
+    the TV's address, MAC *and* the key it issued - over the user's own."""
+    monkeypatch.setenv("LGTV_EASY_HOME", str(tmp_path))
+    monkeypatch.setattr(netdiag, "tcp_probe",
+                        lambda ip, port, timeout=2.0: (False, "no route"))
+    with MockTV(require_pairing=True, known_key="THEIRS") as tv:
+        monkeypatch.setattr(discovery, "locate_tv",
+                            lambda *a, **k: f"127.0.0.1:{tv.port}")
+        cfg = Config()
+        cfg.device = Device(name="t", ip="10.0.0.5", key="OURS")
+        cfg.save()
+
+        res = selfheal.repair(cfg, connect=False, allow_guess=False)
+        assert res.ok is False
+        assert tv.pair_prompts >= 1, "the mock never prompted - test is vacuous"
+    saved = Config.load().device
+    assert (saved.ip, saved.key) == ("10.0.0.5", "OURS")
+
+
+def test_a_person_repairing_can_still_pair_through_the_prompt(monkeypatch,
+                                                              tmp_path):
+    """'Test my TV' is somebody in front of the TV, so the prompt stays."""
+    monkeypatch.setenv("LGTV_EASY_HOME", str(tmp_path))
+    monkeypatch.setattr(netdiag, "tcp_probe",
+                        lambda ip, port, timeout=2.0: (False, "no route"))
+    with MockTV(require_pairing=True, known_key="NEW") as tv:
+        monkeypatch.setattr(discovery, "locate_tv",
+                            lambda *a, **k: f"127.0.0.1:{tv.port}")
+        cfg = Config()
+        cfg.device = Device(name="t", ip="10.0.0.5", key="OLD")
+        cfg.save()
+
+        assert selfheal.repair(cfg, connect=False).ok is True

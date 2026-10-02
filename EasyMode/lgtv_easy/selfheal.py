@@ -228,9 +228,13 @@ def _repair_impl(cfg, res, saved, out, *, persist, connect, blink, on_prompt,
         # and an explicit "host:port" (used in tests / non-standard setups).
         client = WebOSClient(ip, secure=cfg.device.secure, timeout=connect_timeout)
         try:
+            # Unattended, a TV must already know our key: a pairing prompt there
+            # is either on a stranger's screen or answered by one, and a success
+            # would persist that TV's address, MAC and key over ours.
             pair_with_fallback(client, client_key=cfg.device.key,
                                on_prompt=on_prompt, prompt_timeout=prompt_timeout,
-                               prefer_secure=cfg.device.secure, log=out)
+                               prefer_secure=cfg.device.secure, log=out,
+                               silent=not allow_guess)
         except Exception as exc:  # noqa: BLE001 - expected when the TV is unreachable
             res.error = str(exc)
             out(f"  Could not connect at {ip}: {exc}")

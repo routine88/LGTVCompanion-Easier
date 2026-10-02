@@ -266,9 +266,14 @@ class Daemon:
         # Try the port the TV actually accepts (3000 vs secure 3001),
         # preferring whichever worked before. Newer panels only allow 3001.
         from .webos import pair_with_fallback
+        # Silent once we hold a key: nobody is watching for a pairing prompt, so
+        # the only proof that a TV is ours is that it knows our key without
+        # asking. A prompt someone else accepts is how this adopted the other TV
+        # in the house - and the key that TV issued was thrown away regardless.
         pair_with_fallback(client, client_key=self.config.device.key,
                            on_prompt=None, prompt_timeout=client.timeout,
-                           prefer_secure=self.config.device.secure)
+                           prefer_secure=self.config.device.secure,
+                           silent=bool(self.config.device.key))
         # Remember (and persist) what we learned about the TV: the port that
         # worked, and its MAC (asked straight from the TV) for Wake-on-LAN.
         changed = False
@@ -356,7 +361,16 @@ class Daemon:
         old = self.config.device.ip
         if host == old:
             return False
-        how = f"by MAC {mac}" if mac else "by discovery"
+        from . import netdiag
+        if not mac:
+            how = "by discovery"
+        elif netdiag.ip_for_mac(mac) == host:     # a passive ARP read, no traffic
+            how = f"by MAC {mac}"
+        else:
+            # The locator's fallback: an LG TV that is NOT the stored MAC. Saying
+            # "by MAC" here is how a wrong-TV adoption read as routine in the log.
+            how = (f"as the only LG TV answering (the saved MAC {mac} matched "
+                   "nothing)")
         self.logger.info("TV not reachable at %s; found it at %s %s - "
                          "updating the saved address.", old or "(unset)", host, how)
         # Move there, but do NOT write it down yet. An address found by sweeping

@@ -11,7 +11,8 @@ class _FakeClient:
         self.succeed_on_secure = succeed_on_secure
         self.attempts = []
 
-    def connect(self, client_key="", on_prompt=None, prompt_timeout=0, log=None):
+    def connect(self, client_key="", on_prompt=None, prompt_timeout=0, log=None,
+                silent=False):
         self.attempts.append(self.secure)
         if self.secure == self.succeed_on_secure:
             return "CLIENT-KEY"
